@@ -7,6 +7,7 @@
 # ------------------------------------------------------------------------------------------------
 
 import os
+os.environ.setdefault('TORCH_CUDA_ARCH_LIST', '8.0')
 import glob
 
 import torch

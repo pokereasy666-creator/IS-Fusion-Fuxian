@@ -1,6 +1,6 @@
 #!/bin/bash
 
-export PYTHONPATH=$PYTHONPATH:/mnt/cfs/junbo/repository/IS-Fusion
+export PYTHONPATH=$PYTHONPATH:$(cd "$(dirname "$0")/.."; pwd)
 
 TASK_DESC=$1
 PORT=$((8000 + RANDOM %57535))

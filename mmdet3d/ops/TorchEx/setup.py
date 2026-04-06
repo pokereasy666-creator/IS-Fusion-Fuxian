@@ -1,3 +1,5 @@
+import os
+os.environ.setdefault('TORCH_CUDA_ARCH_LIST', '8.0')
 from setuptools import setup, find_packages
 from torch.utils.cpp_extension import BuildExtension, CUDAExtension
 
