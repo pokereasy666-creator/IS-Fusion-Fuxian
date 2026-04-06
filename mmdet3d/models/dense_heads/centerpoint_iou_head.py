@@ -433,8 +433,6 @@ class CenterIoUHead(BaseModule):
             num = masks[task_id].float().sum()
             pred = preds_dict[0]['anno_box'].permute(0, 2, 3, 1).contiguous()
 
-            print(pred.shape)
-            exit()
             pred = pred.view(pred.size(0), -1, pred.size(3))
             pred = self._gather_feat(pred, ind)
             mask = masks[task_id].unsqueeze(2).expand_as(target_box).float()

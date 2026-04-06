@@ -24,7 +24,7 @@ ext_module = ext_loader.load_ext(
 
 from torch.nn.parameter import Parameter
 from torch.nn import Linear
-from torch.nn.init import xavier_uniform_, constant_
+from torch.nn.init import xavier_uniform_, xavier_normal_, constant_
 
 from mmdet3d.ops import SparseBasicBlock, make_sparse_convmodule
 from mmdet3d.ops.spconv import IS_SPCONV2_AVAILABLE

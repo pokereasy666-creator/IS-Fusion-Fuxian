@@ -1,4 +1,6 @@
 # Copyright (c) OpenMMLab. All rights reserved.
+from packaging.version import Version
+
 from .overwrite_spconv.write_spconv2 import register_spconv2
 
 try:
@@ -6,7 +8,7 @@ try:
 except ImportError:
     IS_SPCONV2_AVAILABLE = False
 else:
-    if hasattr(spconv, '__version__') and spconv.__version__ >= '2.0.0':
+    if hasattr(spconv, '__version__') and Version(spconv.__version__) >= Version('2.0.0'):
         IS_SPCONV2_AVAILABLE = register_spconv2()
     else:
         IS_SPCONV2_AVAILABLE = False

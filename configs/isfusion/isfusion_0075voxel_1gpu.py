@@ -9,7 +9,7 @@ data = dict(
 )
 
 # Scale learning rate: original is 0.0001 for 8 GPUs * 4 samples = 32 effective batch
-# For 1 GPU * 2 samples = 2 effective batch
-optimizer = dict(lr=0.00002)
+# For 1 GPU * 2 samples = 2 effective batch -> 0.0001 * (2/32) = 6.25e-6
+optimizer = dict(lr=6.25e-6)
 
 gpu_ids = range(0, 1)

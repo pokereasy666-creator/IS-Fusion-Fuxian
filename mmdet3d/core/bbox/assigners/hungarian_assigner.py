@@ -193,7 +193,7 @@ class HungarianAssigner3DV3(BaseAssigner):
         self.pc_range = pc_range
         self.code_weights = code_weights
         if self.code_weights:
-            self.code_weights = torch.tensor(self.code_weights)[None, :].cuda()
+            self.code_weights = torch.tensor(self.code_weights)[None, :]
 
     def assign(self,
                bbox_pred,
@@ -257,8 +257,9 @@ class HungarianAssigner3DV3(BaseAssigner):
         normalized_gt_bboxes = normalize_bbox(gt_bboxes, self.pc_range)
 
         if self.code_weights is not None:
-            bbox_pred = bbox_pred * self.code_weights
-            normalized_gt_bboxes = normalized_gt_bboxes * self.code_weights
+            code_weights = self.code_weights.to(bbox_pred.device)
+            bbox_pred = bbox_pred * code_weights
+            normalized_gt_bboxes = normalized_gt_bboxes * code_weights
 
         reg_cost = self.reg_cost(bbox_pred[:, :8], normalized_gt_bboxes[:, :8])
 
