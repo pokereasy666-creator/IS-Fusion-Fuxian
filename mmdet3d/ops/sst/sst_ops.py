@@ -655,14 +655,12 @@ class SRATensor(object):
 
             mask_s0 = drop_lvl_s0 == dl
             if not mask_s0.any():
-                print(f'No voxel belongs to drop_level:{dl} in shift 0')
                 continue
             real_max = torch.bincount(batch_win_inds_s0[mask_s0]).max()
             assert real_max <= max_tokens, f'real_max({real_max}) > {max_tokens} in shift0'
 
             mask_s1 = drop_lvl_s1 == dl
             if not mask_s1.any():
-                print(f'No voxel belongs to drop_level:{dl} in shift 1')
                 continue
             real_max = torch.bincount(batch_win_inds_s1[mask_s1]).max()
             assert real_max <= max_tokens, f'real_max({real_max}) > {max_tokens} in shift1'

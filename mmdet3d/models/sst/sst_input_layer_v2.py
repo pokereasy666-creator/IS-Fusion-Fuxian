@@ -310,4 +310,6 @@ class SSTInputLayerV2(nn.Module):
             self.drop_info = meta
         else:
             self.drop_info = meta
-        print(f'drop_info is set to {self.drop_info}, in input_layer')
+        import logging
+        logging.getLogger(__name__).debug(
+            f'drop_info is set to {self.drop_info}, in input_layer')

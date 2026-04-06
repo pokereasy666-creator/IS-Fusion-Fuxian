@@ -183,8 +183,9 @@ class Anchor3DRangeGenerator(object):
         sizes = torch.tensor(sizes, device=device).reshape(-1, 3) * scale
         rotations = torch.tensor(rotations, device=device)
 
-        # torch.meshgrid default behavior is 'id', np's default is 'xy'
-        rets = torch.meshgrid(x_centers, y_centers, z_centers, rotations)
+        # torch.meshgrid default behavior is 'ij', np's default is 'xy'
+        rets = torch.meshgrid(
+            x_centers, y_centers, z_centers, rotations, indexing='ij')
         # torch.meshgrid returns a tuple rather than list
         rets = list(rets)
         tile_shape = [1] * 5
@@ -297,10 +298,11 @@ class AlignedAnchor3DRangeGenerator(Anchor3DRangeGenerator):
             y_centers += y_shift
             x_centers += x_shift
 
-        # torch.meshgrid default behavior is 'id', np's default is 'xy'
+        # torch.meshgrid default behavior is 'ij', np's default is 'xy'
         rets = torch.meshgrid(x_centers[:feature_size[2]],
                               y_centers[:feature_size[1]],
-                              z_centers[:feature_size[0]], rotations)
+                              z_centers[:feature_size[0]], rotations,
+                              indexing='ij')
 
         # torch.meshgrid returns a tuple rather than list
         rets = list(rets)

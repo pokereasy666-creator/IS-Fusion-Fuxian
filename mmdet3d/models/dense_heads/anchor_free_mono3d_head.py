@@ -475,7 +475,7 @@ class AnchorFreeMono3DHead(BaseMono3DDenseHead):
         h, w = featmap_size
         x_range = torch.arange(w, dtype=dtype, device=device)
         y_range = torch.arange(h, dtype=dtype, device=device)
-        y, x = torch.meshgrid(y_range, x_range)
+        y, x = torch.meshgrid(y_range, x_range, indexing='ij')
         if flatten:
             y = y.flatten()
             x = x.flatten()

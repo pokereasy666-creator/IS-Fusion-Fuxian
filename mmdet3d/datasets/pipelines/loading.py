@@ -1169,9 +1169,11 @@ class LoadForeground2DFromMultiSweeps(object):
                 fg_real_points[cam_id] = fg_real_point
 
         else:
-            print("##################################################")
-            print(len(sweep_fg_points))
-            print("##################################################")
+            import warnings
+            warnings.warn(
+                f'Sweep camera count ({len(sweep_fg_points)}) does not match '
+                f'sample camera count ({len(fg_points)}). '
+                f'Skipping sweep merge for this sample.')
 
         fg_info['fg_pixels'] = fg_pixels
         fg_info['fg_points'] = fg_points

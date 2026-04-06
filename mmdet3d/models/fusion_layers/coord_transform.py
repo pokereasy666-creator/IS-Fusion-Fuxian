@@ -1,4 +1,5 @@
 # Copyright (c) OpenMMLab. All rights reserved.
+import warnings
 import torch
 from functools import partial
 
@@ -69,14 +70,12 @@ def apply_3d_transformation(pcd, coord_type, img_meta, reverse=False):
         try:
             rotate_func = partial(pcd.rotate, rotation=pcd_rotate_mat.inverse())
         except RuntimeError:
-            print("Rotate Error")
-            print(pcd_rotate_mat)
-            try:
-                rotate_func = partial(pcd.rotate, rotation=pcd_rotate_mat.inverse())
-            except:
-                print("Double Err")
-                pcd_rotate_mat = torch.eye(3, dtype=dtype, device=device)
-                rotate_func = partial(pcd.rotate, rotation=pcd_rotate_mat.inverse())
+            warnings.warn(
+                f'Failed to invert rotation matrix:\n{pcd_rotate_mat}\n'
+                'Using pseudo-inverse as fallback. Geometric results may be '
+                'slightly inaccurate for this sample.')
+            rotate_func = partial(
+                pcd.rotate, rotation=torch.linalg.pinv(pcd_rotate_mat))
 
         # reverse the pipeline
         flow = flow[::-1]
