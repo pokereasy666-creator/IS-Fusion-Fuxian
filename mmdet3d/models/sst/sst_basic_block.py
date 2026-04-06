@@ -6,7 +6,6 @@ from mmcv.cnn import build_norm_layer
 
 from mmdet3d.ops import flat2window, window2flat
 
-from ipdb import set_trace
 import os
 import pickle as pkl
 

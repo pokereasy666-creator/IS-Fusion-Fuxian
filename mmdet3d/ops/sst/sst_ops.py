@@ -1,5 +1,4 @@
 import torch
-from ipdb import set_trace
 import random
 import numpy as np
 from mmdet3d.ops import spconv
@@ -91,7 +90,10 @@ def flat2window(feat, voxel_drop_lvl, flat2win_inds_dict, drop_info):
         num_windows = (this_inds // max_tokens).max().item() + 1
         feat_3d = torch.zeros((num_windows * max_tokens, feat_dim), dtype=dtype, device=device)
         if this_inds.max() >= num_windows * max_tokens:
-            set_trace()
+            raise RuntimeError(
+                f'flat2window index out of bounds: max index {this_inds.max()} '
+                f'>= num_windows * max_tokens ({num_windows} * {max_tokens} = '
+                f'{num_windows * max_tokens}) at drop_level {dl}')
         feat_3d[this_inds] = feat_this_dl
         feat_3d = feat_3d.reshape((num_windows, max_tokens, feat_dim))
         feat_3d_dict[dl] = feat_3d
