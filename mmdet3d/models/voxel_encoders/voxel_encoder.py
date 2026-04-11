@@ -427,7 +427,7 @@ class DynamicVFE(nn.Module):
         canvas_x = round(
             (self.point_cloud_range[3] - self.point_cloud_range[0]) / self.vx)
         # canvas_channel = voxel_mean.size(1)
-        batch_size = pts_coors[-1, 0] + 1
+        batch_size = int(pts_coors[-1, 0].item()) + 1
         canvas_len = canvas_z * canvas_y * canvas_x * batch_size
         # Create the canvas for this sample
         canvas = voxel_mean.new_zeros(canvas_len, dtype=torch.long)
