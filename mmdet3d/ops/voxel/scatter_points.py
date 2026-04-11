@@ -80,7 +80,7 @@ class DynamicScatter(nn.Module):
         if coors.size(-1) == 3:
             return self.forward_single(points, coors)
         else:
-            batch_size = coors[-1, 0].item() + 1
+            batch_size = coors[-1, 0] + 1
             voxels, voxel_coors = [], []
             for i in range(batch_size):
                 inds = torch.where(coors[:, 0] == i)
