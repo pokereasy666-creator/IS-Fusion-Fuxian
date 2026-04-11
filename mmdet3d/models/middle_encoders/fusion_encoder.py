@@ -999,7 +999,7 @@ class ISFusionEncoder(BaseModule):
             dist = cur_coords[:, 2, :].clone()
             this_mask = (dist > 1e-5)
 
-            cur_coords[:, 2, :] = torch.clamp(cur_coords[:, 2, :], 1e-5, 6e4)
+            cur_coords[:, 2, :] = torch.clamp(cur_coords[:, 2, :], 1e-5, 1e5)
             cur_coords[:, :2, :] /= cur_coords[:, 2:3, :]
 
             # imgaug
