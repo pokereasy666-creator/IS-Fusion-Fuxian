@@ -139,8 +139,7 @@ class NuScenesDataset(Custom3DDataset):
 
         self.with_velocity = with_velocity
         self.eval_version = eval_version
-        from nuscenes.eval.detection.config import config_factory
-        self.eval_detection_configs = config_factory(self.eval_version)
+        self._eval_detection_configs = None
         if self.modality is None:
             self.modality = dict(
                 use_camera=False,
@@ -150,6 +149,13 @@ class NuScenesDataset(Custom3DDataset):
                 use_external=False,
             )
         self.img_num = img_num
+
+    @property
+    def eval_detection_configs(self):
+        if self._eval_detection_configs is None:
+            from nuscenes.eval.detection.config import config_factory
+            self._eval_detection_configs = config_factory(self.eval_version)
+        return self._eval_detection_configs
 
     def get_cat_ids(self, idx):
         """Get category distribution of single scene.
