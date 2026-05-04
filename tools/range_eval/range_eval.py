@@ -59,7 +59,10 @@ class RangeStratifiedEval:
                  split: str = 'val',
                  verbose: bool = False):
         from nuscenes.eval.common.loaders import load_gt, load_prediction
-        from nuscenes.eval.common.utils import filter_eval_boxes
+        try:
+            from nuscenes.eval.common.utils import filter_eval_boxes
+        except ImportError:
+            from nuscenes.eval.common.loaders import filter_eval_boxes
         from nuscenes.eval.detection.config import config_factory
         from nuscenes.eval.detection.data_classes import DetectionBox
         from nuscenes.eval.detection.utils import add_center_dist
