@@ -65,7 +65,10 @@ class RangeStratifiedEval:
             from nuscenes.eval.common.loaders import filter_eval_boxes
         from nuscenes.eval.detection.config import config_factory
         from nuscenes.eval.detection.data_classes import DetectionBox
-        from nuscenes.eval.detection.utils import add_center_dist
+        try:
+            from nuscenes.eval.detection.utils import add_center_dist
+        except ImportError:
+            from nuscenes.eval.common.loaders import add_center_dist
 
         predictions_path = str(Path(predictions_path).resolve())
         if not Path(predictions_path).is_file():
