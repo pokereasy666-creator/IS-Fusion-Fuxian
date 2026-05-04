@@ -16,10 +16,8 @@ This is the gating test before trusting any other output. Run it before
 running the full pipeline on the actual predictions file.
 """
 import argparse
-import json
 import sys
 import tempfile
-from pathlib import Path
 from typing import Dict
 
 OVERALL_MAP_TOL = 1e-3
@@ -53,7 +51,13 @@ def parse_args(argv=None) -> argparse.Namespace:
 def _run_standard(nusc, predictions_path: str, split: str,
                   class_range_override: float) -> Dict:
     """Run the unmodified DetectionEval with class_range overridden to a uniform
-    value, so it matches what RangeStratifiedEval will use."""
+    value, so it matches what RangeStratifiedEval will use.
+
+    Reads results directly from the in-memory DetectionMetrics object via
+    get_label_ap, mirroring the wrapper's pattern. This avoids depending on
+    the metrics_summary.json key layout, which differs subtly across devkit
+    versions.
+    """
     from nuscenes.eval.detection.config import config_factory
     from nuscenes.eval.detection.evaluate import DetectionEval
 
@@ -65,17 +69,17 @@ def _run_standard(nusc, predictions_path: str, split: str,
         evaluator = DetectionEval(
             nusc, config=cfg, result_path=predictions_path,
             eval_set=split, output_dir=tmp, verbose=False)
-        evaluator.main(render_curves=False)
-        with open(Path(tmp) / 'metrics_summary.json') as f:
-            metrics = json.load(f)
+        metrics, _metric_data_list = evaluator.evaluate()
 
     per_class_ap: Dict[str, float] = {}
-    for cls, dist_to_ap in metrics['label_aps'].items():
-        per_class_ap[cls] = float(sum(dist_to_ap.values()) / len(dist_to_ap))
+    for cls in cfg.class_range:
+        ap_values = [float(metrics.get_label_ap(cls, dist_th))
+                     for dist_th in cfg.dist_ths]
+        per_class_ap[cls] = float(sum(ap_values) / len(ap_values))
 
     return {
-        'mAP': float(metrics['mean_ap']),
-        'NDS': float(metrics['nd_score']),
+        'mAP': float(metrics.mean_ap),
+        'NDS': float(metrics.nd_score),
         'per_class_AP': per_class_ap,
     }
 

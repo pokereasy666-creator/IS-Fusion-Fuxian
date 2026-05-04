@@ -43,6 +43,38 @@ def _total_boxes(eval_boxes) -> int:
     return sum(len(eval_boxes[t]) for t in eval_boxes.sample_tokens)
 
 
+def _check_devkit_compat() -> None:
+    """Fail fast with a clear message if the installed nuscenes-devkit version
+    is missing API surface this pipeline depends on.
+
+    Validates the DetectionMetrics interface used by RangeStratifiedEval:
+    - methods: get_label_ap (used to read per-(class, dist_th) AP),
+               add_label_ap (paired sentinel)
+    - attrs:   mean_ap, nd_score, cfg
+    """
+    from nuscenes.eval.detection.config import config_factory
+    from nuscenes.eval.detection.data_classes import DetectionMetrics
+
+    cfg = config_factory('detection_cvpr_2019')
+    m = DetectionMetrics(cfg)
+
+    required_methods = ['get_label_ap', 'add_label_ap']
+    required_attrs = ['mean_ap', 'nd_score', 'cfg']
+    missing = []
+    for name in required_methods:
+        if not callable(getattr(m, name, None)):
+            missing.append(f'method {name}')
+    for name in required_attrs:
+        if not hasattr(m, name):
+            missing.append(f'attribute {name}')
+    if missing:
+        raise RuntimeError(
+            'nuscenes-devkit version incompatibility. '
+            f'DetectionMetrics is missing: {missing}. '
+            'Update tools/range_eval to handle this devkit version.'
+        )
+
+
 class RangeStratifiedEval:
     """Wraps nuScenes DetectionEval to produce per-range stratified results.
 
@@ -58,6 +90,8 @@ class RangeStratifiedEval:
                  class_range_override: float = 100.0,
                  split: str = 'val',
                  verbose: bool = False):
+        _check_devkit_compat()
+
         from nuscenes.eval.common.loaders import load_gt, load_prediction
         try:
             from nuscenes.eval.common.utils import filter_eval_boxes
@@ -151,7 +185,7 @@ class RangeStratifiedEval:
         for cls in self.classes:
             ap_per_dist: Dict[str, float] = {}
             for dist_th in self.cfg.dist_ths:
-                ap_per_dist[str(dist_th)] = float(metrics.label_aps[cls][dist_th])
+                ap_per_dist[str(dist_th)] = float(metrics.get_label_ap(cls, dist_th))
             per_class_ap_per_dist[cls] = ap_per_dist
             if n_gt[cls] == 0:
                 per_class_ap[cls] = float('nan')
