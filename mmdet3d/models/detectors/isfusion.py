@@ -224,9 +224,14 @@ class ISFusionDetector(MVXTwoStageDetector):
             points, img=img, img_metas=img_metas, **kwargs)
         losses = dict()
         if pts_feats:
-            losses_pts = self.forward_pts_train(pts_feats, img_feats, gt_bboxes_3d,
-                                                gt_labels_3d, img_metas,
-                                                gt_bboxes_ignore)
+            losses_pts = self.forward_pts_train(
+                pts_feats, img_feats, gt_bboxes_3d,
+                gt_labels_3d, img_metas,
+                gt_bboxes_ignore,
+                lidar2img=kwargs.get('lidar2img'),
+                img_aug_matrix=kwargs.get('img_aug_matrix'),
+                lidar_aug_matrix=kwargs.get('lidar_aug_matrix'),
+            )
             losses.update(losses_pts)
         if img_feats:
             losses_img = self.forward_img_train(
@@ -246,7 +251,10 @@ class ISFusionDetector(MVXTwoStageDetector):
                           gt_bboxes_3d,
                           gt_labels_3d,
                           img_metas,
-                          gt_bboxes_ignore=None):
+                          gt_bboxes_ignore=None,
+                          lidar2img=None,
+                          img_aug_matrix=None,
+                          lidar_aug_matrix=None):
         """Forward function for point cloud branch.
 
         Args:
@@ -258,24 +266,47 @@ class ISFusionDetector(MVXTwoStageDetector):
             img_metas (list[dict]): Meta information of samples.
             gt_bboxes_ignore (list[torch.Tensor], optional): Ground truth
                 boxes to be ignored. Defaults to None.
+            lidar2img: ``[B, V, 4, 4]`` original calibration. Plumbed to
+                the bbox head for the Direction 1 image classifier.
+            img_aug_matrix: ``[B, V, 4, 4]`` image augmentation matrices.
+            lidar_aug_matrix: ``[B, 4, 4]`` lidar augmentation matrices.
 
         Returns:
             dict: Losses of each branch.
         """
-        if len(pts_feats) == 2:  # instance heatmap loss
-            outs = self.pts_bbox_head(pts_feats[0], img_feats, img_metas)
-            loss_inputs = [gt_bboxes_3d, gt_labels_3d, outs, pts_feats[1]]
-        else:
-            outs = self.pts_bbox_head(pts_feats, img_feats, img_metas)
-            loss_inputs = [gt_bboxes_3d, gt_labels_3d, outs]
-        losses = self.pts_bbox_head.loss(*loss_inputs)
+        # Direction 1: pass calibration + augmentation matrices to head.
+        self.pts_bbox_head._lidar2img = lidar2img
+        self.pts_bbox_head._img_aug_matrix = img_aug_matrix
+        self.pts_bbox_head._lidar_aug_matrix = lidar_aug_matrix
+        try:
+            if len(pts_feats) == 2:  # instance heatmap loss
+                outs = self.pts_bbox_head(pts_feats[0], img_feats, img_metas)
+                loss_inputs = [gt_bboxes_3d, gt_labels_3d, outs, pts_feats[1]]
+            else:
+                outs = self.pts_bbox_head(pts_feats, img_feats, img_metas)
+                loss_inputs = [gt_bboxes_3d, gt_labels_3d, outs]
+            losses = self.pts_bbox_head.loss(*loss_inputs)
+        finally:
+            self.pts_bbox_head._lidar2img = None
+            self.pts_bbox_head._img_aug_matrix = None
+            self.pts_bbox_head._lidar_aug_matrix = None
         return losses
 
-    def simple_test_pts(self, x, x_img, img_metas, rescale=False):
+    def simple_test_pts(self, x, x_img, img_metas, rescale=False,
+                        lidar2img=None, img_aug_matrix=None,
+                        lidar_aug_matrix=None):
         """Test function of point cloud branch."""
-        outs = self.pts_bbox_head(x, x_img, img_metas)
-        bbox_list = self.pts_bbox_head.get_bboxes(
-            outs, img_metas, rescale=rescale)
+        self.pts_bbox_head._lidar2img = lidar2img
+        self.pts_bbox_head._img_aug_matrix = img_aug_matrix
+        self.pts_bbox_head._lidar_aug_matrix = lidar_aug_matrix
+        try:
+            outs = self.pts_bbox_head(x, x_img, img_metas)
+            bbox_list = self.pts_bbox_head.get_bboxes(
+                outs, img_metas, rescale=rescale)
+        finally:
+            self.pts_bbox_head._lidar2img = None
+            self.pts_bbox_head._img_aug_matrix = None
+            self.pts_bbox_head._lidar_aug_matrix = None
         bbox_results = [
             bbox3d2result(bboxes, scores, labels)
             for bboxes, scores, labels in bbox_list
@@ -291,7 +322,11 @@ class ISFusionDetector(MVXTwoStageDetector):
         bbox_list = [dict() for i in range(len(img_metas))]
         if pts_feats and self.with_pts_bbox:
             bbox_pts = self.simple_test_pts(
-                pts_feats, img_feats, img_metas, rescale=rescale)
+                pts_feats, img_feats, img_metas, rescale=rescale,
+                lidar2img=kwargs.get('lidar2img'),
+                img_aug_matrix=kwargs.get('img_aug_matrix'),
+                lidar_aug_matrix=kwargs.get('lidar_aug_matrix'),
+            )
             for result_dict, pts_bbox in zip(bbox_list, bbox_pts):
                 result_dict['pts_bbox'] = pts_bbox
         if img_feats and self.with_img_bbox:

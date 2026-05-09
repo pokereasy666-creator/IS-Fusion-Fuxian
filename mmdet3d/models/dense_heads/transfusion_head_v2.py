@@ -14,7 +14,8 @@ from mmdet3d.core import (circle_nms, draw_heatmap_gaussian, gaussian_radius,
 from mmdet3d.core.bbox.structures import rotation_3d_in_axis
 from mmdet3d.core import Box3DMode, LiDARInstance3DBoxes
 from mmdet3d.models import builder
-from mmdet3d.models.builder import HEADS, build_loss
+from mmdet3d.models.builder import HEADS, build_loss, build_head
+from mmdet3d.models.dense_heads.image_classifier_head import fuse_scores_additive
 from mmdet3d.models.utils import clip_sigmoid
 from mmdet3d.models.fusion_layers import apply_3d_transformation
 from mmdet3d.ops.iou3d.iou3d_utils import nms_gpu
@@ -620,6 +621,7 @@ class TransFusionHeadV2(nn.Module):
                  train_cfg=None,
                  test_cfg=None,
                  bbox_coder=None,
+                 image_classifier=None,
                  ):
         super(TransFusionHeadV2, self).__init__()
 
@@ -715,6 +717,18 @@ class TransFusionHeadV2(nn.Module):
 
         self.init_weights()
         self._init_assigner_sampler()
+
+        # Direction 1: image classification head.
+        self.image_classifier_cfg = image_classifier
+        if self.image_classifier_cfg is not None:
+            self.image_classifier = build_head(self.image_classifier_cfg)
+        else:
+            self.image_classifier = None
+
+        # Calibration matrices set by detector before forward.
+        self._lidar2img = None
+        self._img_aug_matrix = None
+        self._lidar_aug_matrix = None
 
         # Position Embedding for Cross-Attention, which is re-used during training
         x_size = self.test_cfg["grid_size"][0] // self.test_cfg["out_size_factor"]
@@ -869,6 +883,46 @@ class TransFusionHeadV2(nn.Module):
             query_pos = res_layer["center"].detach().clone().permute(0, 2, 1)
 
         #################################
+        # Direction 1: image-aware score fusion on FINAL decoder layer
+        #################################
+        if self.image_classifier is not None and self._lidar2img is not None:
+            # Use FINAL decoder layer's predicted center and height for projection.
+            final_center = ret_dicts[-1]['center']   # [B, 2, K] in BEV grid units
+            final_height = ret_dicts[-1]['height']   # [B, 1, K] in meters
+            query_pos_for_img = final_center.permute(0, 2, 1)  # [B, K, 2]
+
+            # img_inputs is the stride-8 feature tensor [B*N_views, C, H/8, W/8].
+            # multi_apply zips feats and img_feats and stops at the shorter
+            # length (1 BEV level), so img_inputs is a single tensor here, not a list.
+            img_head_out = self.image_classifier(
+                img_feats=img_inputs,
+                query_pos=query_pos_for_img,
+                query_height=final_height,
+                lidar2img=self._lidar2img,
+                img_aug_matrix=self._img_aug_matrix,
+                lidar_aug_matrix=self._lidar_aug_matrix,
+            )
+            s_img_logits = img_head_out['logits']
+            in_any_view = img_head_out['in_any_view']
+
+            # CRITICAL (C6): preserve pre-fusion BEV logits for the BEV head's
+            # final-layer cls supervision before mutating ret_dicts[-1]['heatmap'].
+            ret_dicts[-1]['heatmap_pre_fusion'] = ret_dicts[-1]['heatmap'].clone()
+
+            # Apply additive logit fusion to the FINAL layer's heatmap (used at inference).
+            fused = fuse_scores_additive(
+                s_bev_logits=ret_dicts[-1]['heatmap'],
+                s_img_logits=s_img_logits,
+                alpha_pre_softplus=self.image_classifier.alpha,
+                in_any_view=in_any_view,
+            )
+            ret_dicts[-1]['heatmap'] = fused
+
+            # Store for loss computation.
+            ret_dicts[-1]['s_img_logits'] = s_img_logits
+            ret_dicts[-1]['in_any_view'] = in_any_view
+
+        #################################
         # transformer decoder layer (img feature as K,V)
         #################################
         ret_dicts[0]["query_heatmap_score"] = heatmap.gather(
@@ -882,14 +936,23 @@ class TransFusionHeadV2(nn.Module):
             return [ret_dicts[-1]]
 
         # return all the layer's results for auxiliary superivison
+        # Direction 1 fields exist only on the final layer; skip them in the
+        # cross-layer cat and copy the final-layer values through directly.
+        final_only_keys = {"heatmap_pre_fusion", "s_img_logits", "in_any_view"}
         new_res = {}
         for key in ret_dicts[0].keys():
-            if key not in ["dense_heatmap", "dense_heatmap_old", "query_heatmap_score"]:
+            if key not in [
+                "dense_heatmap", "dense_heatmap_old", "query_heatmap_score"
+            ] and key not in final_only_keys:
                 new_res[key] = torch.cat(
                     [ret_dict[key] for ret_dict in ret_dicts], dim=-1
                 )
             else:
-                new_res[key] = ret_dicts[0][key]
+                if key in ret_dicts[0]:
+                    new_res[key] = ret_dicts[0][key]
+        for key in final_only_keys:
+            if key in ret_dicts[-1]:
+                new_res[key] = ret_dicts[-1][key]
         return [new_res]
 
     def forward(self, feats, img_feats, metas):
@@ -1201,10 +1264,19 @@ class TransFusionHeadV2(nn.Module):
                                   ...,
                                   idx_layer * self.num_proposals : (idx_layer + 1) * self.num_proposals,
                                   ].reshape(-1)
-            layer_score = preds_dict["heatmap"][
-                          ...,
-                          idx_layer * self.num_proposals : (idx_layer + 1) * self.num_proposals,
-                          ]
+            # Direction 1 (C6): BEV's final-layer cls supervision must use the
+            # pre-fusion heatmap so image gradients don't corrupt BEV training.
+            is_final_layer = (idx_layer == self.num_decoder_layers - 1)
+            if is_final_layer and 'heatmap_pre_fusion' in preds_dict:
+                # heatmap_pre_fusion is final-layer only, shape
+                # [B, num_classes, num_proposals]. Unlike 'heatmap' which is
+                # concatenated across layers, this needs no slicing.
+                layer_score = preds_dict["heatmap_pre_fusion"]
+            else:
+                layer_score = preds_dict["heatmap"][
+                              ...,
+                              idx_layer * self.num_proposals : (idx_layer + 1) * self.num_proposals,
+                              ]
             layer_cls_score = layer_score.permute(0, 2, 1).reshape(-1, self.num_classes)
             layer_loss_cls = self.loss_cls(
                 layer_cls_score,
@@ -1271,6 +1343,73 @@ class TransFusionHeadV2(nn.Module):
             loss_dict[f"{prefix}_loss_cls"] = layer_loss_cls
             loss_dict[f"{prefix}_loss_bbox"] = layer_loss_bbox
             # loss_dict[f'{prefix}_loss_iou'] = layer_loss_iou
+
+        # Direction 1: image classification + consistency losses.
+        if self.image_classifier is not None and 's_img_logits' in preds_dict:
+            s_img_logits = preds_dict['s_img_logits']  # [B, K, num_classes]
+            in_any_view = preds_dict['in_any_view']    # [B, K]
+
+            # Use the final-layer slice of labels / weights (same supervision as BEV).
+            final_labels = labels[..., -self.num_proposals:].reshape(-1)
+            final_label_weights = label_weights[
+                ..., -self.num_proposals:
+            ].reshape(-1)
+
+            # Image cls: supervise visible candidates (positive + negative).
+            img_cls_mask = (final_label_weights > 0) & in_any_view.reshape(-1)
+            s_img_flat = s_img_logits.reshape(-1, self.num_classes)
+
+            if img_cls_mask.sum() > 0:
+                loss_img_cls = self.loss_cls(
+                    s_img_flat[img_cls_mask],
+                    final_labels[img_cls_mask],
+                    torch.ones_like(
+                        final_labels[img_cls_mask], dtype=torch.float32
+                    ),
+                    avg_factor=max(int(img_cls_mask.sum().item()), 1),
+                )
+                loss_dict['loss_img_cls'] = loss_img_cls * 1.0
+            else:
+                # Zero loss but keeps gradient hookups alive.
+                loss_dict['loss_img_cls'] = s_img_logits.sum() * 0.0
+
+            # Consistency loss (KL) on positive matched + dual-visible candidates.
+            if 'heatmap_pre_fusion' in preds_dict:
+                s_bev_pre = preds_dict['heatmap_pre_fusion']  # [B, num_classes, K]
+
+                # C7: positives only (labels < num_classes excludes assigned-bg)
+                # AND visible in some view.
+                consistency_mask = (
+                    (final_label_weights > 0)
+                    & (final_labels < self.num_classes)
+                    & in_any_view.reshape(-1)
+                )
+
+                if consistency_mask.sum() > 0:
+                    s_bev_pre_log = F.log_softmax(
+                        s_bev_pre.permute(0, 2, 1), dim=-1
+                    )  # [B, K, C]
+                    s_img_log = F.log_softmax(s_img_logits, dim=-1)  # [B, K, C]
+
+                    s_bev_pre_log_flat = s_bev_pre_log.reshape(-1, self.num_classes)
+                    s_img_log_flat = s_img_log.reshape(-1, self.num_classes)
+
+                    # Symmetric KL: 0.5 * (KL(bev || img) + KL(img || bev))
+                    kl_bev_img = F.kl_div(
+                        s_img_log_flat[consistency_mask],
+                        s_bev_pre_log_flat[consistency_mask].exp(),
+                        reduction='none', log_target=False,
+                    ).sum(dim=-1)
+                    kl_img_bev = F.kl_div(
+                        s_bev_pre_log_flat[consistency_mask],
+                        s_img_log_flat[consistency_mask].exp(),
+                        reduction='none', log_target=False,
+                    ).sum(dim=-1)
+
+                    loss_consistency = 0.5 * (kl_bev_img.mean() + kl_img_bev.mean())
+                    loss_dict['loss_consistency'] = loss_consistency * 0.1
+                else:
+                    loss_dict['loss_consistency'] = s_img_logits.sum() * 0.0
 
         loss_dict[f"matched_ious"] = layer_loss_cls.new_tensor(matched_ious)
 

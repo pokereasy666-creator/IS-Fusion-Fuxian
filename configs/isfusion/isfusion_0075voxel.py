@@ -140,6 +140,22 @@ model = dict(
         # loss_iou=dict(type='CrossEntropyLoss', use_sigmoid=True, reduction='mean', loss_weight=0.0),
         loss_bbox=dict(type='L1Loss', reduction='mean', loss_weight=0.25),
         loss_heatmap=dict(type='GaussianFocalLoss', reduction='mean', loss_weight=1.0),
+        # Direction 1: image classification head for FP suppression via
+        # additive logit fusion. Set to None to disable.
+        image_classifier=dict(
+            type='ImageClassifierHead',
+            in_channels=256,
+            num_classes=len(class_names),
+            hidden_channels=256,
+            num_views=6,
+            feature_stride=8,
+            img_shape=img_scale,
+            out_size_factor=out_size_factor,
+            voxel_size=tuple(voxel_size[:2]),
+            pc_range=tuple(point_cloud_range[:2]),
+            alpha_init=0.0,
+            depth_min=0.5,
+        ),
     ),
 
 
