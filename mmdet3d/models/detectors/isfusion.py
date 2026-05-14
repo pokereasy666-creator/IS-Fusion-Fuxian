@@ -55,11 +55,16 @@ class ISFusionDetector(MVXTwoStageDetector):
     def _normalize_aug_matrix(matrix):
         """Normalize an augmentation/calibration matrix to a stacked tensor.
 
-        MMDetection3D's data pipeline delivers these matrices as either:
-        - A stacked tensor [B, ...] (training mode, post-DataContainer scatter)
-        - A Python list of per-sample tensors [tensor, tensor, ...] (test mode)
+        MMDetection3D's data pipeline delivers these matrices in three forms:
+        1. A stacked tensor [B, ...] (training mode, post-DataContainer scatter).
+        2. A Python list of per-sample tensors [tensor[..., 4, 4], ...] of length B.
+        3. A singleton list of an already-batched tensor [tensor[B, ..., 4, 4]] of length 1.
 
-        Returns a stacked tensor in both cases. Returns None if input is None.
+        Returns a batched tensor in all cases. Returns None if input is None.
+
+        The third case appears in IS-Fusion's test pipeline: the dataloader keeps
+        matrices as batched tensors and wraps them in a length-1 list. Stacking
+        would add an extra leading dimension; we unwrap instead.
         """
         if matrix is None:
             return None
@@ -70,9 +75,14 @@ class ISFusionDetector(MVXTwoStageDetector):
                 return None
             if not all(isinstance(m, torch.Tensor) for m in matrix):
                 raise TypeError(
-                    f'Expected list of tensors, got list of types: '
+                    f'Expected list of tensors, got types: '
                     f'{[type(m).__name__ for m in matrix]}'
                 )
+            # Singleton-list-of-batched-tensor: unwrap rather than stack.
+            # Per-sample matrices are 2D [4, 4] or 3D [V, 4, 4]; a length-1 list
+            # containing a 3D-or-higher tensor must already be batched.
+            if len(matrix) == 1 and matrix[0].dim() >= 3:
+                return matrix[0]
             return torch.stack(matrix, dim=0)
         raise TypeError(
             f'Expected None, torch.Tensor, or list/tuple of tensors, '
