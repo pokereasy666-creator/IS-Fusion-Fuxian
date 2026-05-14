@@ -622,6 +622,8 @@ class TransFusionHeadV2(nn.Module):
                  test_cfg=None,
                  bbox_coder=None,
                  image_classifier=None,
+                 loss_img_cls_weight=1.0,
+                 loss_consistency_weight=0.1,
                  ):
         super(TransFusionHeadV2, self).__init__()
 
@@ -720,6 +722,8 @@ class TransFusionHeadV2(nn.Module):
 
         # Direction 1: image classification head.
         self.image_classifier_cfg = image_classifier
+        self.loss_img_cls_weight = loss_img_cls_weight
+        self.loss_consistency_weight = loss_consistency_weight
         if self.image_classifier_cfg is not None:
             self.image_classifier = build_head(self.image_classifier_cfg)
         else:
@@ -1368,7 +1372,7 @@ class TransFusionHeadV2(nn.Module):
                     ),
                     avg_factor=max(int(img_cls_mask.sum().item()), 1),
                 )
-                loss_dict['loss_img_cls'] = loss_img_cls * 1.0
+                loss_dict['loss_img_cls'] = loss_img_cls * self.loss_img_cls_weight
             else:
                 # Zero loss but keeps gradient hookups alive.
                 loss_dict['loss_img_cls'] = s_img_logits.sum() * 0.0
@@ -1407,7 +1411,7 @@ class TransFusionHeadV2(nn.Module):
                     ).sum(dim=-1)
 
                     loss_consistency = 0.5 * (kl_bev_img.mean() + kl_img_bev.mean())
-                    loss_dict['loss_consistency'] = loss_consistency * 0.1
+                    loss_dict['loss_consistency'] = loss_consistency * self.loss_consistency_weight
                 else:
                     loss_dict['loss_consistency'] = s_img_logits.sum() * 0.0
 
