@@ -51,6 +51,35 @@ class ISFusionDetector(MVXTwoStageDetector):
             point_cloud_range=self.pc_range)
 
 
+    @staticmethod
+    def _normalize_aug_matrix(matrix):
+        """Normalize an augmentation/calibration matrix to a stacked tensor.
+
+        MMDetection3D's data pipeline delivers these matrices as either:
+        - A stacked tensor [B, ...] (training mode, post-DataContainer scatter)
+        - A Python list of per-sample tensors [tensor, tensor, ...] (test mode)
+
+        Returns a stacked tensor in both cases. Returns None if input is None.
+        """
+        if matrix is None:
+            return None
+        if isinstance(matrix, torch.Tensor):
+            return matrix
+        if isinstance(matrix, (list, tuple)):
+            if len(matrix) == 0:
+                return None
+            if not all(isinstance(m, torch.Tensor) for m in matrix):
+                raise TypeError(
+                    f'Expected list of tensors, got list of types: '
+                    f'{[type(m).__name__ for m in matrix]}'
+                )
+            return torch.stack(matrix, dim=0)
+        raise TypeError(
+            f'Expected None, torch.Tensor, or list/tuple of tensors, '
+            f'got {type(matrix).__name__}'
+        )
+
+
     def extract_img_feat(self, img, img_metas):
         """Extract features of images."""
         if 'img_mask_idx' in img_metas[0].keys():
@@ -275,9 +304,12 @@ class ISFusionDetector(MVXTwoStageDetector):
             dict: Losses of each branch.
         """
         # Direction 1: pass calibration + augmentation matrices to head.
-        self.pts_bbox_head._lidar2img = lidar2img
-        self.pts_bbox_head._img_aug_matrix = img_aug_matrix
-        self.pts_bbox_head._lidar_aug_matrix = lidar_aug_matrix
+        # The data pipeline yields these as stacked tensors during training but
+        # as Python lists of per-sample tensors during testing; normalize here
+        # so the head always sees a stacked tensor.
+        self.pts_bbox_head._lidar2img = self._normalize_aug_matrix(lidar2img)
+        self.pts_bbox_head._img_aug_matrix = self._normalize_aug_matrix(img_aug_matrix)
+        self.pts_bbox_head._lidar_aug_matrix = self._normalize_aug_matrix(lidar_aug_matrix)
         try:
             if len(pts_feats) == 2:  # instance heatmap loss
                 outs = self.pts_bbox_head(pts_feats[0], img_feats, img_metas)
@@ -296,9 +328,11 @@ class ISFusionDetector(MVXTwoStageDetector):
                         lidar2img=None, img_aug_matrix=None,
                         lidar_aug_matrix=None):
         """Test function of point cloud branch."""
-        self.pts_bbox_head._lidar2img = lidar2img
-        self.pts_bbox_head._img_aug_matrix = img_aug_matrix
-        self.pts_bbox_head._lidar_aug_matrix = lidar_aug_matrix
+        # See note in forward_pts_train: normalize list-of-tensors (test mode)
+        # to a stacked tensor so the head sees a uniform format.
+        self.pts_bbox_head._lidar2img = self._normalize_aug_matrix(lidar2img)
+        self.pts_bbox_head._img_aug_matrix = self._normalize_aug_matrix(img_aug_matrix)
+        self.pts_bbox_head._lidar_aug_matrix = self._normalize_aug_matrix(lidar_aug_matrix)
         try:
             outs = self.pts_bbox_head(x, x_img, img_metas)
             bbox_list = self.pts_bbox_head.get_bboxes(
