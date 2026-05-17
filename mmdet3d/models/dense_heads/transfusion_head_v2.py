@@ -1379,7 +1379,22 @@ class TransFusionHeadV2(nn.Module):
 
             # Consistency loss (KL) on positive matched + dual-visible candidates.
             if 'heatmap_pre_fusion' in preds_dict:
-                s_bev_pre = preds_dict['heatmap_pre_fusion']  # [B, num_classes, K]
+                # F1 fix: route gradient to alpha via the fused heatmap.
+                # heatmap_pre_fusion remains used by the BEV head's final-layer
+                # loss_cls (C6 preserved). Consistency loss is explicitly
+                # cross-modality, so using the fused signal is appropriate.
+                s_bev_for_consistency = preds_dict['heatmap'][
+                    ..., -self.num_proposals:
+                ]  # [B, num_classes, K]
+                # Guard against future regressions in final_only_keys handling:
+                # 'heatmap' is concatenated across decoder layers, so the last
+                # num_proposals entries must be the fused final-layer slice.
+                assert s_bev_for_consistency.shape[-1] == self.num_proposals, (
+                    f"Expected {self.num_proposals} proposals in fused-heatmap "
+                    f"slice, got {s_bev_for_consistency.shape[-1]}. The "
+                    f"'heatmap' tensor shape changed; check the new_res "
+                    f"final_only_keys handling in forward_single."
+                )
 
                 # C7: positives only (labels < num_classes excludes assigned-bg)
                 # AND visible in some view.
@@ -1390,22 +1405,22 @@ class TransFusionHeadV2(nn.Module):
                 )
 
                 if consistency_mask.sum() > 0:
-                    s_bev_pre_log = F.log_softmax(
-                        s_bev_pre.permute(0, 2, 1), dim=-1
+                    s_bev_log = F.log_softmax(
+                        s_bev_for_consistency.permute(0, 2, 1), dim=-1
                     )  # [B, K, C]
                     s_img_log = F.log_softmax(s_img_logits, dim=-1)  # [B, K, C]
 
-                    s_bev_pre_log_flat = s_bev_pre_log.reshape(-1, self.num_classes)
+                    s_bev_log_flat = s_bev_log.reshape(-1, self.num_classes)
                     s_img_log_flat = s_img_log.reshape(-1, self.num_classes)
 
                     # Symmetric KL: 0.5 * (KL(bev || img) + KL(img || bev))
                     kl_bev_img = F.kl_div(
                         s_img_log_flat[consistency_mask],
-                        s_bev_pre_log_flat[consistency_mask].exp(),
+                        s_bev_log_flat[consistency_mask].exp(),
                         reduction='none', log_target=False,
                     ).sum(dim=-1)
                     kl_img_bev = F.kl_div(
-                        s_bev_pre_log_flat[consistency_mask],
+                        s_bev_log_flat[consistency_mask],
                         s_img_log_flat[consistency_mask].exp(),
                         reduction='none', log_target=False,
                     ).sum(dim=-1)
