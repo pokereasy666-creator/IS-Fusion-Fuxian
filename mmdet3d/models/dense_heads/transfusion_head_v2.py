@@ -919,6 +919,7 @@ class TransFusionHeadV2(nn.Module):
                 s_img_logits=s_img_logits,
                 alpha_pre_softplus=self.image_classifier.alpha,
                 in_any_view=in_any_view,
+                fusion_weight_override=self.image_classifier.fusion_weight_override,
             )
             ret_dicts[-1]['heatmap'] = fused
 

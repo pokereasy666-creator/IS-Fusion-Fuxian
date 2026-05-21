@@ -45,6 +45,7 @@ class ImageClassifierHead(BaseModule):
         pc_range: tuple = (-54.0, -54.0),
         alpha_init: float = 0.0,
         depth_min: float = 0.5,
+        fusion_weight_override=None,
         init_cfg=None,
     ):
         super().__init__(init_cfg=init_cfg)
@@ -58,6 +59,12 @@ class ImageClassifierHead(BaseModule):
         self.voxel_size = tuple(voxel_size)
         self.pc_range = tuple(pc_range)
         self.depth_min = depth_min
+
+        if fusion_weight_override is not None:
+            assert len(fusion_weight_override) == num_classes, (
+                f'fusion_weight_override length {len(fusion_weight_override)} '
+                f'!= num_classes {num_classes}')
+        self.fusion_weight_override = fusion_weight_override
 
         self.feature_proj = nn.Linear(in_channels, hidden_channels)
         self.classifier = nn.Sequential(
@@ -189,6 +196,7 @@ def fuse_scores_additive(
     s_img_logits: torch.Tensor,
     alpha_pre_softplus: torch.Tensor,
     in_any_view: torch.Tensor,
+    fusion_weight_override=None,
 ) -> torch.Tensor:
     """Additive logit-space fusion.
 
@@ -206,11 +214,25 @@ def fuse_scores_additive(
         s_img_logits: ``[B, K, num_classes]``.
         alpha_pre_softplus: ``[num_classes]``.
         in_any_view: ``[B, K]`` boolean.
+        fusion_weight_override: optional iterable of ``num_classes`` floats.
+            When provided, used directly as the POST-softplus per-class
+            effective weight; ``alpha_pre_softplus`` is ignored and softplus
+            is NOT applied. The override tensor is materialized on the same
+            device/dtype as ``s_bev_logits``. ``0.0`` disables fusion;
+            ``softplus(0) == log(2) ~= 0.693`` reproduces an alpha-init=0
+            head with softplus enabled.
 
     Returns:
         Fused logits ``[B, num_classes, K]``.
     """
-    alpha_pos = F.softplus(alpha_pre_softplus)  # [num_classes]
+    if fusion_weight_override is not None:
+        alpha_pos = torch.tensor(
+            fusion_weight_override,
+            device=s_bev_logits.device,
+            dtype=s_bev_logits.dtype,
+        )
+    else:
+        alpha_pos = F.softplus(alpha_pre_softplus)  # [num_classes]
     s_img_aligned = s_img_logits.permute(0, 2, 1)  # [B, num_classes, K]
     fused = s_bev_logits + alpha_pos[None, :, None] * s_img_aligned
 
