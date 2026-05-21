@@ -19,7 +19,7 @@ then apply the image augmentation to land in augmented-image pixel space.
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from mmcv.runner import BaseModule
+from mmcv.runner import HOOKS, BaseModule, Hook
 
 from mmdet3d.models.builder import HEADS
 
@@ -70,6 +70,19 @@ class ImageClassifierHead(BaseModule):
         self.alpha = nn.Parameter(torch.full((num_classes,), float(alpha_init)))
         # Per-class default logit for candidates outside every camera view.
         self.out_of_view_default = nn.Parameter(torch.zeros(num_classes))
+
+        # F2: gradient-zeroing freeze switch (toggled by AlphaFreezeHook).
+        # alpha stays requires_grad=True from construction so the optimizer's
+        # paramwise_cfg lr_mult group is built around it; this tensor-level
+        # backward hook zeros alpha's grad inside loss.backward() when the
+        # flag is True, so optimizer.step() applies a zero update.
+        self._freeze_alpha_grad = False
+        self.alpha.register_hook(self._mask_alpha_grad)
+
+    def _mask_alpha_grad(self, grad):
+        if self._freeze_alpha_grad:
+            return torch.zeros_like(grad)
+        return grad
 
     def forward(
         self,
@@ -217,3 +230,55 @@ def fuse_scores_additive(
     # Out-of-view: pass through s_bev unchanged.
     fused = torch.where(in_any_view[:, None, :], fused, s_bev_logits)
     return fused
+
+
+@HOOKS.register_module()
+class AlphaFreezeHook(Hook):
+    """Freeze ``image_classifier.alpha`` for the first N epochs via grad zeroing.
+
+    Keeps ``alpha.requires_grad=True`` from construction so the optimizer's
+    ``paramwise_cfg`` ``lr_mult`` custom_key takes effect on alpha's param
+    group (mmcv's ``DefaultOptimizerConstructor`` skips custom_keys for
+    params with ``requires_grad=False``). During the freeze period the
+    tensor backward hook registered in :class:`ImageClassifierHead` zeros
+    alpha's grad inside ``loss.backward()``, so ``optimizer.step()``
+    applies a zero update.
+
+    ``after_train_iter`` is implemented as a defense-in-depth safety net.
+    In mmcv 1.3-1.4, ``OptimizerHook.after_train_iter`` runs
+    ``backward + step`` atomically and no inter-hook window exists between
+    them, so the tensor backward hook is the actual mechanism. The
+    ``after_train_iter`` here is a no-op in normal operation but documents
+    intent and protects against any future regression.
+    """
+
+    def __init__(self, freeze_epochs=1):
+        self.freeze_epochs = freeze_epochs
+
+    @staticmethod
+    def _image_classifier(runner):
+        model = runner.model
+        if hasattr(model, 'module'):
+            model = model.module
+        head = getattr(model, 'pts_bbox_head', None)
+        if head is None:
+            return None
+        return getattr(head, 'image_classifier', None)
+
+    def before_train_epoch(self, runner):
+        ic = self._image_classifier(runner)
+        if ic is None:
+            return
+        ic._freeze_alpha_grad = (runner.epoch < self.freeze_epochs)
+        if getattr(runner, 'logger', None) is not None:
+            runner.logger.info(
+                f'[AlphaFreezeHook] epoch={runner.epoch} '
+                f'freeze_alpha_grad={ic._freeze_alpha_grad}'
+            )
+
+    def after_train_iter(self, runner):
+        ic = self._image_classifier(runner)
+        if ic is None or not ic._freeze_alpha_grad:
+            return
+        if ic.alpha.grad is not None:
+            ic.alpha.grad.zero_()

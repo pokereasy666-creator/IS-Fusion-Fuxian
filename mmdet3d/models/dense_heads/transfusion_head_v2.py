@@ -624,6 +624,7 @@ class TransFusionHeadV2(nn.Module):
                  image_classifier=None,
                  loss_img_cls_weight=1.0,
                  loss_consistency_weight=0.1,
+                 loss_alpha_weight=0.5,
                  ):
         super(TransFusionHeadV2, self).__init__()
 
@@ -724,6 +725,7 @@ class TransFusionHeadV2(nn.Module):
         self.image_classifier_cfg = image_classifier
         self.loss_img_cls_weight = loss_img_cls_weight
         self.loss_consistency_weight = loss_consistency_weight
+        self.loss_alpha_weight = loss_alpha_weight
         if self.image_classifier_cfg is not None:
             self.image_classifier = build_head(self.image_classifier_cfg)
         else:
@@ -1429,6 +1431,35 @@ class TransFusionHeadV2(nn.Module):
                     loss_dict['loss_consistency'] = loss_consistency * self.loss_consistency_weight
                 else:
                     loss_dict['loss_consistency'] = s_img_logits.sum() * 0.0
+
+            # F2: alpha-loss on detached-fusion scores.
+            # Both s_bev and s_img are detached so this loss's gradient reaches
+            # ONLY alpha. Optimizes: "holding trained BEV and image scores
+            # fixed, what per-class alpha minimizes classification error on the
+            # matched candidates from the (static, pre-fusion) Hungarian
+            # assignment?"
+            if 'heatmap_pre_fusion' in preds_dict:
+                s_bev_pre = preds_dict['heatmap_pre_fusion'].detach()  # [B, C, K]
+                s_img_det = s_img_logits.detach()                      # [B, K, C]
+                alpha_pos = F.softplus(self.image_classifier.alpha)    # [C]
+                s_img_perm = s_img_det.permute(0, 2, 1)                # [B, C, K]
+                fused_for_alpha = (
+                    s_bev_pre + alpha_pos[None, :, None] * s_img_perm
+                )
+                fused_for_alpha = torch.where(
+                    in_any_view[:, None, :], fused_for_alpha, s_bev_pre
+                )
+                loss_alpha = self.loss_cls(
+                    fused_for_alpha.permute(0, 2, 1).reshape(
+                        -1, self.num_classes
+                    ),
+                    final_labels,
+                    final_label_weights,
+                    avg_factor=max(num_pos, 1),
+                )
+                loss_dict['loss_alpha'] = loss_alpha * self.loss_alpha_weight
+            else:
+                loss_dict['loss_alpha'] = s_img_logits.sum() * 0.0
 
         loss_dict[f"matched_ious"] = layer_loss_cls.new_tensor(matched_ious)
 

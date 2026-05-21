@@ -15,7 +15,8 @@ from .centerpoint_fpn_head import CenterFPNHead
 from .centerpoint_iou_head import CenterIoUHead
 from .transfusion_head import TransFusionHead
 from .transfusion_head_v2 import TransFusionHeadV2
-from .image_classifier_head import ImageClassifierHead, fuse_scores_additive
+from .image_classifier_head import (AlphaFreezeHook, ImageClassifierHead,
+                                    fuse_scores_additive)
 
 
 __all__ = [
@@ -23,5 +24,5 @@ __all__ = [
     'SSD3DHead', 'BaseConvBboxHead', 'CenterHead', 'ShapeAwareHead',
     'BaseMono3DDenseHead', 'AnchorFreeMono3DHead', 'FCOSMono3DHead',
     'GroupFree3DHead', 'CenterFPNHead', 'CenterIoUHead', 'TransFusionHead', 'TransFusionHeadV2',
-    'ImageClassifierHead', 'fuse_scores_additive'
+    'ImageClassifierHead', 'fuse_scores_additive', 'AlphaFreezeHook'
 ]
