@@ -919,7 +919,7 @@ class TransFusionHeadV2(nn.Module):
             fused = fuse_scores_additive(
                 s_bev_logits=ret_dicts[-1]['heatmap'],
                 s_img_logits=s_img_logits,
-                alpha_pre_softplus=self.image_classifier.alpha,
+                alpha_pre_softplus=self.image_classifier.alpha_log_weight(),
                 in_any_view=in_any_view,
             )
             ret_dicts[-1]['heatmap'] = fused
@@ -1441,7 +1441,7 @@ class TransFusionHeadV2(nn.Module):
             if 'heatmap_pre_fusion' in preds_dict:
                 s_bev_pre = preds_dict['heatmap_pre_fusion'].detach()  # [B, C, K]
                 s_img_det = s_img_logits.detach()                      # [B, K, C]
-                alpha_pos = F.softplus(self.image_classifier.alpha)    # [C]
+                alpha_pos = F.softplus(self.image_classifier.alpha_log_weight())    # [C]
                 s_img_perm = s_img_det.permute(0, 2, 1)                # [B, C, K]
                 fused_for_alpha = (
                     s_bev_pre + alpha_pos[None, :, None] * s_img_perm

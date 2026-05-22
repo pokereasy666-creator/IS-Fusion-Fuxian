@@ -44,6 +44,8 @@ class ImageClassifierHead(BaseModule):
         voxel_size: tuple = (0.075, 0.075),
         pc_range: tuple = (-54.0, -54.0),
         alpha_init: float = 0.0,
+        beta_init: float = 0.0,
+        learn_beta: bool = False,
         depth_min: float = 0.5,
         init_cfg=None,
     ):
@@ -68,6 +70,8 @@ class ImageClassifierHead(BaseModule):
 
         # Per-class learnable alpha, stored pre-softplus.
         self.alpha = nn.Parameter(torch.full((num_classes,), float(alpha_init)))
+        self.alpha_beta = nn.Parameter(
+            torch.tensor(float(beta_init)), requires_grad=bool(learn_beta))
         # Per-class default logit for candidates outside every camera view.
         self.out_of_view_default = nn.Parameter(torch.zeros(num_classes))
 
@@ -83,6 +87,13 @@ class ImageClassifierHead(BaseModule):
         if self._freeze_alpha_grad:
             return torch.zeros_like(grad)
         return grad
+
+    def alpha_log_weight(self) -> torch.Tensor:
+        """Per-class fusion log-weight = beta + zero-mean(alpha).
+        Mean-centering projects out the global-scale direction, so alpha's
+        gradient is zero-mean and only the per-class differential is learnable;
+        alpha_beta (frozen by default) holds the scale. init -> softplus(0)=0.6931."""
+        return self.alpha_beta + (self.alpha - self.alpha.mean())
 
     def forward(
         self,
