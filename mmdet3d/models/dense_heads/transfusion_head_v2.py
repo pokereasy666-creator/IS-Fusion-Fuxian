@@ -625,6 +625,7 @@ class TransFusionHeadV2(nn.Module):
                  loss_img_cls_weight=1.0,
                  loss_consistency_weight=0.1,
                  loss_alpha_weight=0.5,
+                 alpha_conf_threshold=0.3,
                  ):
         super(TransFusionHeadV2, self).__init__()
 
@@ -726,6 +727,7 @@ class TransFusionHeadV2(nn.Module):
         self.loss_img_cls_weight = loss_img_cls_weight
         self.loss_consistency_weight = loss_consistency_weight
         self.loss_alpha_weight = loss_alpha_weight
+        self.alpha_conf_threshold = alpha_conf_threshold
         if self.image_classifier_cfg is not None:
             self.image_classifier = build_head(self.image_classifier_cfg)
         else:
@@ -1449,13 +1451,21 @@ class TransFusionHeadV2(nn.Module):
                 fused_for_alpha = torch.where(
                     in_any_view[:, None, :], fused_for_alpha, s_bev_pre
                 )
+                # FIX #2 (confident_balanced): restrict alpha-loss to the BEV-confident
+                # regime (where FPs live), removing the low-s_bev recall population.
+                # Keep both pos and neg within the confident set (true final_labels) so
+                # alpha is not pushed to trivially mute the image term.
+                bev_conf = s_bev_pre.sigmoid().max(dim=1).values            # [B, K]
+                conf_mask = (bev_conf >= self.alpha_conf_threshold).reshape(-1)  # [B*K]
+                alpha_label_weights = final_label_weights * conf_mask.to(final_label_weights.dtype)
+                alpha_avg = max(int((alpha_label_weights > 0).sum().item()), 1)
                 loss_alpha = self.loss_cls(
                     fused_for_alpha.permute(0, 2, 1).reshape(
                         -1, self.num_classes
                     ),
                     final_labels,
-                    final_label_weights,
-                    avg_factor=max(num_pos, 1),
+                    alpha_label_weights,
+                    avg_factor=alpha_avg,
                 )
                 loss_dict['loss_alpha'] = loss_alpha * self.loss_alpha_weight
             else:
