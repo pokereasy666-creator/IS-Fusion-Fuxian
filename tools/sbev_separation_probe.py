@@ -1,10 +1,21 @@
-"""S_bev separation probe for ``alpha_conf_threshold`` (D1 F3, fix #2).
+"""S_bev separation probe for ``alpha_conf_threshold`` (D1 F3, fix #2)
+plus recall-at-proposal mechanism gate for D2.
 
-Diagnostic question: does any ``alpha_conf_threshold`` cleanly separate the
-BEV-confident-FP population (the precision targets fix #2 wants to KEEP) from
-the low-``s_bev`` missed-positive population (the recall cases fix #2 wants to
-DROP)? If no threshold separates them, fix #2 is a no-op and F3 should not
-launch.
+Diagnostic question A (F3 fix #2): does any ``alpha_conf_threshold`` cleanly
+separate the BEV-confident-FP population (the precision targets fix #2 wants
+to KEEP) from the low-``s_bev`` missed-positive population (the recall cases
+fix #2 wants to DROP)? If no threshold separates them, fix #2 is a no-op and
+F3 should not launch.
+
+Diagnostic question B (D2 mechanism gate): per class x per range bin, are
+the GT objects PRESENT in the proposal set but suppressed (high recall +
+low matched s_bev), or ABSENT entirely (low recall)? This is computed from
+the Hungarian assigner's GT->proposal output captured under the same
+``_probe_buffer`` guard inside ``get_targets_single``. Focused on
+``barrier`` and ``traffic_cone`` at 30-50m because that's where D2 must
+choose its mechanism. Recall is computed from the actual assigner result,
+not approximated from proposal-side data; if gt_records are missing the
+analyzer raises.
 
 Mechanics:
     - Build the model from --config and load --checkpoint (same as
@@ -57,6 +68,14 @@ OVERFIRED_CLASSES = ['pedestrian', 'motorcycle', 'bicycle']   # FPs to KEEP
 RECALL_CLASSES = ['barrier', 'traffic_cone']                  # missed pos to DROP
 SWEEP_TAUS = [0.1, 0.2, 0.3, 0.4, 0.5]
 QUANTILES = [10, 25, 50, 75, 90]
+
+# Recall-at-proposal analysis (D2 mechanism gate).
+RANGE_BINS = [(0.0, 30.0), (30.0, 50.0), (50.0, 100.0)]
+RANGE_LABELS = ['0-30m', '30-50m', '50-100m']
+FOCUS_BIN_LO, FOCUS_BIN_HI = 30.0, 50.0       # the bin we report on barrier+cone
+RECALL_HIGH = 0.7        # recall_at_proposal >= => "GTs are mostly present"
+RECALL_LOW = 0.3         # recall_at_proposal <= => "GTs are mostly absent"
+SUPPRESS_MEDIAN = 0.3    # matched s_bev median <= => "suppressed at proposal"
 
 
 # --------------------------------------------------------------------------
@@ -174,6 +193,68 @@ def flatten_buffer(buffer, num_classes):
     if xy_all:
         out['xy'] = np.concatenate(xy_all, axis=0)
     return out
+
+
+def collect_gt_entries(buffer):
+    """Flatten per-batch gt_records into a per-GT entry list.
+
+    Each entry: dict(cls=int, range_m=float, matched=bool, matched_sbev=float).
+    ``matched_sbev`` is sigmoid(s_bev_pre[b, :, prop_idx]).max() for the
+    matched proposal, or NaN when unmatched. Raises if any batch lacks
+    gt_records -- per the task spec we do NOT approximate recall from
+    proposal-side data.
+    """
+    entries = []
+    missing_batches = 0
+    for batch_rec in buffer:
+        gt_records = batch_rec.get('gt_records', None)
+        if gt_records is None:
+            missing_batches += 1
+            continue
+        s_bev_pre = batch_rec['s_bev_pre']  # [B, C, K]
+        K = s_bev_pre.shape[-1]
+        for sample_rec in gt_records:
+            b = int(sample_rec['sample_idx'])
+            labels = sample_rec['gt_labels_3d']           # [num_gt]
+            centers = sample_rec['gt_centers_xy']          # [num_gt, 2]
+            gt_inds = sample_rec['final_layer_gt_inds']    # [num_proposals_final]
+            num_gt = int(sample_rec['num_gts'])
+            if num_gt == 0:
+                continue
+            if int(gt_inds.numel()) != K:
+                raise RuntimeError(
+                    f'gt_inds length {int(gt_inds.numel())} != s_bev_pre K={K}; '
+                    'final-layer assignment / proposal-count mismatch -- the '
+                    'capture point in get_targets_single is misaligned with '
+                    'the loss_alpha dump. Refusing to compute recall.'
+                )
+            sigmoid_b = torch.sigmoid(s_bev_pre[b])        # [C, K]
+            max_per_prop = sigmoid_b.max(dim=0).values     # [K]
+            for j in range(num_gt):
+                matched_idx_t = (gt_inds == (j + 1)).nonzero(as_tuple=False)
+                matched = matched_idx_t.numel() > 0
+                if matched:
+                    # Hungarian assigner produces at most one proposal per GT.
+                    prop_idx = int(matched_idx_t[0].item())
+                    matched_sbev = float(max_per_prop[prop_idx].item())
+                else:
+                    matched_sbev = float('nan')
+                rng = float(
+                    torch.sqrt(centers[j, 0] ** 2 + centers[j, 1] ** 2).item()
+                )
+                entries.append(dict(
+                    cls=int(labels[j].item()),
+                    range_m=rng,
+                    matched=bool(matched),
+                    matched_sbev=matched_sbev,
+                ))
+    if missing_batches > 0:
+        raise RuntimeError(
+            f'{missing_batches}/{len(buffer)} batches lack gt_records: the '
+            "head's get_targets_single capture did not fire. Recall-at-"
+            'proposal cannot be reliably computed from proposal-side data.'
+        )
+    return entries
 
 
 # --------------------------------------------------------------------------
@@ -335,6 +416,131 @@ def _safe_pct(numer_mask, denom_mask):
     return 100.0 * int((numer_mask & denom_mask).sum()) / d
 
 
+def _range_bin_label(r):
+    for (lo, hi), label in zip(RANGE_BINS, RANGE_LABELS):
+        if lo <= r < hi:
+            return label
+    return None
+
+
+def _matched_sbev_quantiles(matched_sbev_list):
+    arr = np.array([v for v in matched_sbev_list if not np.isnan(v)],
+                   dtype=np.float64)
+    if arr.size == 0:
+        return float('nan'), float('nan'), float('nan')
+    q10, q50, q90 = np.percentile(arr, [10, 50, 90])
+    return float(q10), float(q50), float(q90)
+
+
+def _fmt(x, w=6, p=3):
+    if isinstance(x, float) and (x != x):  # NaN
+        return ' ' * (w - 2) + 'NA'
+    return f'{x:>{w}.{p}f}'
+
+
+def analyze_recall(entries, num_classes, out_dir):
+    """Per-class x per-range recall-at-proposal + matched s_bev quantiles.
+
+    Decides D2's mechanism: for barrier/traffic_cone at 30-50m, are the GT
+    objects present in the candidate set but suppressed (high recall +
+    low matched s_bev median) or absent entirely (low recall)?
+    """
+    print()
+    print('=' * 72)
+    print('RECALL-AT-PROPOSAL (per class x per range bin) -- D2 mechanism gate')
+    print('=' * 72)
+    print(f'Total GT instances across probed batches: {len(entries)}')
+    print()
+    print(f'{"class":<22} {"range":<8} {"n_gt":>7} {"matched":>8} '
+          f'{"recall":>8}   matched_sbev (q10/q50/q90)')
+    rows = []
+    for c, name in enumerate(CLASS_NAMES[:num_classes]):
+        for (lo, hi), label in zip(RANGE_BINS, RANGE_LABELS):
+            sel = [e for e in entries if e['cls'] == c
+                   and lo <= e['range_m'] < hi]
+            n_gt = len(sel)
+            matched_sel = [e for e in sel if e['matched']]
+            n_matched = len(matched_sel)
+            recall = (n_matched / n_gt) if n_gt > 0 else float('nan')
+            q10, q50, q90 = _matched_sbev_quantiles(
+                [e['matched_sbev'] for e in matched_sel])
+            print(f'{name:<22} {label:<8} {n_gt:>7} {n_matched:>8} '
+                  f'{_fmt(recall, 8, 3)}   '
+                  f'{_fmt(q10)}  {_fmt(q50)}  {_fmt(q90)}')
+            rows.append(dict(
+                cls=name, range=label, n_gt=n_gt, n_matched=n_matched,
+                recall=recall,
+                matched_sbev_q10=q10,
+                matched_sbev_q50=q50,
+                matched_sbev_q90=q90,
+            ))
+
+    # ---- focused summary: barrier + traffic_cone at 30-50m ---------------
+    print()
+    print('--- FOCUSED: barrier + traffic_cone at '
+          f'{FOCUS_BIN_LO:.0f}-{FOCUS_BIN_HI:.0f}m ---')
+    print(f'(verdict thresholds, auditable: recall_high={RECALL_HIGH}, '
+          f'recall_low={RECALL_LOW}, suppress_median={SUPPRESS_MEDIAN})')
+    focus_rows = []
+    n_gt_focus_total = 0
+    for cls_name in RECALL_CLASSES:
+        c = CLASS_NAMES.index(cls_name)
+        sel = [e for e in entries
+               if e['cls'] == c
+               and FOCUS_BIN_LO <= e['range_m'] < FOCUS_BIN_HI]
+        n_gt = len(sel)
+        n_gt_focus_total += n_gt
+        matched_sel = [e for e in sel if e['matched']]
+        n_matched = len(matched_sel)
+        recall = (n_matched / n_gt) if n_gt > 0 else float('nan')
+        q10, q50, q90 = _matched_sbev_quantiles(
+            [e['matched_sbev'] for e in matched_sel])
+
+        if n_gt == 0:
+            verdict = 'no_GTs_in_bin'
+        elif recall >= RECALL_HIGH and (q50 == q50) and q50 <= SUPPRESS_MEDIAN:
+            verdict = 'present-but-suppressed'
+        elif recall <= RECALL_LOW:
+            verdict = 'absent'
+        else:
+            verdict = 'mixed'
+
+        print(f'  {cls_name:<14} n_gt={n_gt:>5}  matched={n_matched:>5}  '
+              f'recall={_fmt(recall, 5, 3)}  '
+              f'sbev q10/q50/q90={_fmt(q10)}/{_fmt(q50)}/{_fmt(q90)}  '
+              f'-> {verdict}')
+        focus_rows.append(dict(
+            cls=cls_name,
+            range_lo=FOCUS_BIN_LO,
+            range_hi=FOCUS_BIN_HI,
+            n_gt=n_gt,
+            n_matched=n_matched,
+            recall=recall,
+            matched_sbev_q10=q10,
+            matched_sbev_q50=q50,
+            matched_sbev_q90=q90,
+            recall_high=RECALL_HIGH,
+            recall_low=RECALL_LOW,
+            suppress_median=SUPPRESS_MEDIAN,
+            verdict=verdict,
+        ))
+
+    print()
+    print('*' * 72)
+    print(f'AP-headroom denominator: n_gt(barrier + traffic_cone @ '
+          f'{FOCUS_BIN_LO:.0f}-{FOCUS_BIN_HI:.0f}m) = {n_gt_focus_total}')
+    print('*' * 72)
+    print()
+
+    os.makedirs(out_dir, exist_ok=True)
+    _write_csv(os.path.join(out_dir, 'recall_at_proposal.csv'), rows)
+    _write_csv(os.path.join(out_dir, 'recall_focused_bcone_3050.csv'),
+               focus_rows)
+    print(f'[probe] recall_at_proposal.csv + '
+          'recall_focused_bcone_3050.csv written under '
+          f'{out_dir}')
+
+
 def _write_csv(path, rows):
     if not rows:
         return
@@ -410,6 +616,11 @@ def main():
     num_classes = len(getattr(dataset, 'CLASSES', CLASS_NAMES))
     records = flatten_buffer(buffer, num_classes)
     analyze(records, num_classes, args.out_dir)
+
+    # GT-side: per-class per-range recall-at-proposal (D2 mechanism gate).
+    # Raises if gt_records are missing -- we do NOT approximate recall.
+    gt_entries = collect_gt_entries(buffer)
+    analyze_recall(gt_entries, num_classes, args.out_dir)
 
 
 if __name__ == '__main__':

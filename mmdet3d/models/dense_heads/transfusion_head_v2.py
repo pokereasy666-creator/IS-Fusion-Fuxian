@@ -744,6 +744,12 @@ class TransFusionHeadV2(nn.Module):
         # tools/sbev_separation_probe.py sets this to [] before its forward
         # loop and appends one dict per batch.
         self._probe_buffer = None
+        # Per-sample GT-side records (assigner output, gt classes, gt centers),
+        # populated under the same _probe_buffer guard inside get_targets_single
+        # and drained into the per-batch dump in loss_alpha. Always [] when the
+        # probe is off (no writes happen because every append is guarded by
+        # `_probe_buffer is not None`), so this is a strict no-op too.
+        self._probe_gt_pending = []
 
         # Position Embedding for Cross-Attention, which is re-used during training
         x_size = self.test_cfg["grid_size"][0] // self.test_cfg["out_size_factor"]
@@ -1107,6 +1113,28 @@ class TransFusionHeadV2(nn.Module):
             else:
                 raise NotImplementedError
             assign_result_list.append(assign_result)
+
+        # Probe capture (default OFF). When the s_bev separation probe sets
+        # _probe_buffer = [], record GT-side state from the FINAL decoder
+        # layer's assignment so the analyzer can compute per-class per-range
+        # recall-at-proposal. gt_inds entries are 0=unmatched or k=matched to
+        # the (k-1)th GT (per mmdet AssignResult convention). Strict no-op
+        # when _probe_buffer is None: this branch is skipped and
+        # _probe_gt_pending stays empty.
+        if self._probe_buffer is not None:
+            final_assign = assign_result_list[-1]
+            self._probe_gt_pending.append(dict(
+                sample_idx=int(batch_idx),
+                gt_labels_3d=(
+                    gt_labels_3d.detach().cpu()
+                    if gt_labels_3d is not None
+                    else torch.zeros(0, dtype=torch.long)
+                ),
+                gt_centers_xy=gt_bboxes_3d.gravity_center[:, :2]
+                    .detach().float().cpu(),
+                final_layer_gt_inds=final_assign.gt_inds.detach().cpu(),
+                num_gts=int(final_assign.num_gts),
+            ))
 
         # combine assign result of each layer
         assign_result_ensemble = AssignResult(
@@ -1490,12 +1518,18 @@ class TransFusionHeadV2(nn.Module):
                         .float()
                         .cpu()
                     )  # [B, K, 2] in BEV grid units (aug LiDAR frame)
+                    # Drain the per-sample GT records captured in
+                    # get_targets_single for this batch. Resetting to [] keeps
+                    # batches independent and ensures no cross-batch leakage.
+                    gt_records = self._probe_gt_pending
+                    self._probe_gt_pending = []
                     self._probe_buffer.append(dict(
                         s_bev_pre=s_bev_pre.detach().float().cpu(),
                         final_labels=final_labels.detach().cpu(),
                         final_label_weights=final_label_weights.detach().cpu(),
                         in_any_view=in_any_view.detach().cpu(),
                         candidate_xy=candidate_xy,
+                        gt_records=gt_records,
                     ))
             else:
                 loss_dict['loss_alpha'] = s_img_logits.sum() * 0.0
