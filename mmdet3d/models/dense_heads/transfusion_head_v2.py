@@ -738,6 +738,13 @@ class TransFusionHeadV2(nn.Module):
         self._img_aug_matrix = None
         self._lidar_aug_matrix = None
 
+        # Diagnostic probe buffer for alpha_conf_threshold separation analysis.
+        # Default None means OFF: the dump branch in loss_alpha is skipped, so
+        # training is byte-for-byte unaffected. The s_bev separation probe in
+        # tools/sbev_separation_probe.py sets this to [] before its forward
+        # loop and appends one dict per batch.
+        self._probe_buffer = None
+
         # Position Embedding for Cross-Attention, which is re-used during training
         x_size = self.test_cfg["grid_size"][0] // self.test_cfg["out_size_factor"]
         y_size = self.test_cfg["grid_size"][1] // self.test_cfg["out_size_factor"]
@@ -1468,6 +1475,28 @@ class TransFusionHeadV2(nn.Module):
                     avg_factor=alpha_avg,
                 )
                 loss_dict['loss_alpha'] = loss_alpha * self.loss_alpha_weight
+
+                # Diagnostic dump (default OFF). When _probe_buffer is a list
+                # (set externally by tools/sbev_separation_probe.py), append a
+                # detached/cpu snapshot of the tensors the analyzer needs to
+                # decide whether any alpha_conf_threshold separates BEV-
+                # confident FPs from low-s_bev recall positives. When None,
+                # this is a strict no-op so training is unaffected.
+                if self._probe_buffer is not None:
+                    candidate_xy = (
+                        preds_dict['center'][..., -self.num_proposals:]
+                        .permute(0, 2, 1)
+                        .detach()
+                        .float()
+                        .cpu()
+                    )  # [B, K, 2] in BEV grid units (aug LiDAR frame)
+                    self._probe_buffer.append(dict(
+                        s_bev_pre=s_bev_pre.detach().float().cpu(),
+                        final_labels=final_labels.detach().cpu(),
+                        final_label_weights=final_label_weights.detach().cpu(),
+                        in_any_view=in_any_view.detach().cpu(),
+                        candidate_xy=candidate_xy,
+                    ))
             else:
                 loss_dict['loss_alpha'] = s_img_logits.sum() * 0.0
 
