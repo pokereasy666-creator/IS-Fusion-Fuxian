@@ -1,6 +1,8 @@
 # Copyright (c) OpenMMLab. All rights reserved.
+import torch
 from mmcv.runner import auto_fp16
 from torch import nn as nn
+from torch.nn import functional as F
 
 from mmdet3d.ops import SparseBasicBlock, make_sparse_convmodule
 # spconv v1
@@ -49,6 +51,7 @@ class SparseEncoder(nn.Module):
                  encoder_paddings=((1, ), (1, 1, 1), (1, 1, 1), ((0, 1, 1), 1,
                                                                  1)),
                  block_type='conv_module',
+                 use_shc=False,
                  **kwargs):
         super().__init__()
         assert block_type in ['conv_module', 'basicblock']
@@ -103,6 +106,63 @@ class SparseEncoder(nn.Module):
             indice_key='spconv_down2',
             conv_type='SparseConv3d')
 
+        self.use_shc = use_shc
+        if self.use_shc:
+            self._build_shc(norm_cfg)
+
+    def _build_shc(self, norm_cfg):
+        """MGAF-style SHC modules (built only when use_shc=True).
+
+        Two extra XY-only stride-2 sparse stages beyond the deepest encoder
+        stage, each height-compressed like conv_out, then fused back to the
+        baseline B_P width (output_channels * D = 512 @ 180x180).
+        """
+        oc = self.output_channels
+        self.shc_down5 = make_sparse_convmodule(
+            oc, oc, kernel_size=3, stride=(1, 2, 2), norm_cfg=norm_cfg,
+            padding=1, indice_key='spconv_shc5', conv_type='SparseConv3d')
+        self.shc_down6 = make_sparse_convmodule(
+            oc, oc, kernel_size=3, stride=(1, 2, 2), norm_cfg=norm_cfg,
+            padding=1, indice_key='spconv_shc6', conv_type='SparseConv3d')
+        self.shc_out5 = make_sparse_convmodule(
+            oc, oc, kernel_size=(3, 1, 1), stride=(2, 1, 1), norm_cfg=norm_cfg,
+            padding=0, indice_key='spconv_shc_down5', conv_type='SparseConv3d')
+        self.shc_out6 = make_sparse_convmodule(
+            oc, oc, kernel_size=(3, 1, 1), stride=(2, 1, 1), norm_cfg=norm_cfg,
+            padding=0, indice_key='spconv_shc_down6', conv_type='SparseConv3d')
+        # D = 2 for sparse_shape z=41 -> per-scale dense BEV = output_channels*2.
+        bev_ch = oc * 2
+        self.shc_fuse = nn.Sequential(
+            nn.Conv2d(bev_ch * 3, bev_ch, kernel_size=3, padding=1, bias=False),
+            nn.BatchNorm2d(bev_ch),
+            nn.ReLU(inplace=True))
+
+    def _shc_fuse_forward(self, sparse_feat, bev_f4):
+        """Fuse multi-scale sparse-height-compressed BEVs into bev_f4's width.
+
+        sparse_feat is encode_features[-1] (XY-stride 8, z=5, output_channels);
+        bev_f4 is the baseline dense spatial_features (N, output_channels*D,
+        180, 180). F5/F6 add stride-16/32 scales, are height-compressed and
+        upsampled to 180x180, then the concatenation is projected back to
+        exactly bev_f4's channel width (the preserved B_P contract).
+        """
+        sparse_f5 = self.shc_down5(sparse_feat)   # XY 180 -> 90 (z kept)
+        sparse_f6 = self.shc_down6(sparse_f5)      # XY 90 -> 45 (z kept)
+
+        out5 = self.shc_out5(sparse_f5).dense()    # (N, C, D, 90, 90)
+        n, c, d, h, w = out5.shape
+        bev_f5 = out5.view(n, c * d, h, w)
+        out6 = self.shc_out6(sparse_f6).dense()    # (N, C, D, 45, 45)
+        n, c, d, h, w = out6.shape
+        bev_f6 = out6.view(n, c * d, h, w)
+
+        size = bev_f4.shape[-2:]
+        bev_f5 = F.interpolate(
+            bev_f5, size=size, mode='bilinear', align_corners=False)
+        bev_f6 = F.interpolate(
+            bev_f6, size=size, mode='bilinear', align_corners=False)
+
+        return self.shc_fuse(torch.cat([bev_f4, bev_f5, bev_f6], dim=1))
 
     @auto_fp16(apply_to=('voxel_features', ))
     def forward(self, voxel_features, coors, batch_size, swin_format=False, img_feats=None, **kwargs):
@@ -134,6 +194,10 @@ class SparseEncoder(nn.Module):
 
         N, C, D, H, W = spatial_features.shape
         spatial_features = spatial_features.view(N, C * D, H, W)
+
+        if self.use_shc:
+            spatial_features = self._shc_fuse_forward(
+                encode_features[-1], spatial_features)
 
         return spatial_features, encode_features, kwargs
 
