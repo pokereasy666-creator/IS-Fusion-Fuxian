@@ -869,13 +869,16 @@ class ISFusionEncoder(BaseModule):
             norm_cfg=dict(type='BN2d'),
             )
 
-        # config-gated AFDT fusion alternative; identity-init via afdt_gamma=0 so
-        # training starts exactly at the conv-concat baseline.
+        # config-gated AFDT fusion. 'afdt': AFDT as a residual on the conv-concat
+        # fusion, identity-init via afdt_gamma=0 so training starts exactly at the
+        # baseline. 'afdt_replace': AFDT is the sole fusion operator (no conv-concat
+        # contribution, no gamma) -- no identity-init, so it does NOT start at baseline.
         self.fusion_type = kwargs.get('fusion_type', 'conv')
-        if self.fusion_type == 'afdt':
+        if self.fusion_type in ('afdt', 'afdt_replace'):
             self.afdt = AFDT(in_ch_img=embed_dims, in_ch_lidar=embed_dims * 2,
                              c_work=embed_dims, out_ch=embed_dims // 2,
                              attn_stride=4)
+        if self.fusion_type == 'afdt':
             self.afdt_gamma = nn.Parameter(torch.zeros(1))
 
         self.get_regions = nn.ModuleList()
@@ -1174,10 +1177,14 @@ class ISFusionEncoder(BaseModule):
         kwargs.update(dict(img_bev_feats=img_bev_feats))
         kwargs.update(dict(lidar_feats=lidar_feats))
 
-        fused = self.conv_fusion(torch.cat([img_bev_feats, lidar_feats], dim=1))
-        if self.fusion_type == 'afdt':
-            fused = fused + self.afdt_gamma * self.afdt(lidar_feats, img_bev_feats)
-        bev_feats = fused
+        if self.fusion_type == 'afdt_replace':
+            # AFDT is the sole fusion operator; conv-concat is bypassed entirely.
+            bev_feats = self.afdt(lidar_feats, img_bev_feats)            # [B,128,180,180]
+        elif self.fusion_type == 'afdt':
+            bev_feats = self.conv_fusion(torch.cat([img_bev_feats, lidar_feats], dim=1))
+            bev_feats = bev_feats + self.afdt_gamma * self.afdt(lidar_feats, img_bev_feats)
+        else:  # 'conv' baseline
+            bev_feats = self.conv_fusion(torch.cat([img_bev_feats, lidar_feats], dim=1))
 
         grid_features = bev_feats.flatten(2, 3).permute(0, 2, 1).reshape(-1, bev_feats.shape[1])
         bev_coords = self.create_dense_coord(self.bev_size, self.bev_size, bs).type_as(grid_features).int()
