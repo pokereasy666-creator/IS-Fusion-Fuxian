@@ -868,6 +868,20 @@ class ISFusionEncoder(BaseModule):
             norm_cfg=dict(type='BN2d'),
             )
 
+        # Optional dense LSS image->BEV branch (default OFF -> baseline untouched).
+        # When enabled it replaces the sparse img_fv_to_bev path in forward(),
+        # producing the same [bs, 256, 180, 180] B_I. Imported lazily so the
+        # baseline never needs the compiled bev_pool_ext.
+        self.use_dense_image_bev = kwargs.get('use_dense_image_bev', False)
+        if self.use_dense_image_bev:
+            from .dense_lss import DenseLSSBranch
+            self.dense_lss = DenseLSSBranch(
+                in_channels=embed_dims, out_channels=embed_dims,
+                image_size=(384, 1056), feature_size=(24, 66),
+                xbound=[-54.0, 54.0, 0.6], ybound=[-54.0, 54.0, 0.6],
+                zbound=[-5.0, 3.0, 8.0], dbound=[1.0, 60.0, 0.5],
+            )
+
         self.get_regions = nn.ModuleList()
         self.grid2region_att = nn.ModuleList()
         for l in range(len(region_shape)):
@@ -1159,7 +1173,21 @@ class ISFusionEncoder(BaseModule):
                 **kwargs):
 
 
-        img_bev_feats = self.img_fv_to_bev([img_mlvl_feats[1]], bs, **kwargs)
+        if self.use_dense_image_bev:
+            B = bs
+            N = img_mlvl_feats[1].shape[0] // B
+            feat = img_mlvl_feats[1].view(B, N, self.embed_dims, 24, 66)
+            img_bev_feats = self.dense_lss(
+                feat,
+                kwargs['points'],
+                lidar2img=kwargs['lidar2img'],
+                img_aug_matrix=kwargs['img_aug_matrix'],
+                lidar_aug_matrix=kwargs['lidar_aug_matrix'],
+                camera2lidar=kwargs['camera2lidar'],
+                camera_intrinsics=kwargs['camera_intrinsics'],
+            )
+        else:
+            img_bev_feats = self.img_fv_to_bev([img_mlvl_feats[1]], bs, **kwargs)
 
         kwargs.update(dict(img_bev_feats=img_bev_feats))
         kwargs.update(dict(lidar_feats=lidar_feats))

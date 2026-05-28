@@ -95,6 +95,9 @@ class ISFusionDetector(MVXTwoStageDetector):
         kwargs.update(dict(pts_metas=pts_metas))
         kwargs.update(dict(img_metas=img_metas))
         kwargs.update(dict(pts_backbone=self.pts_backbone))
+        # raw per-sample point list for the optional dense LSS image->BEV branch
+        # (inert for the baseline, which never reads kwargs['points']).
+        kwargs.update(dict(points=pts))
 
         x = self.fusion_encoder(img_feats, pts_feats, batch_size, **kwargs)
 
