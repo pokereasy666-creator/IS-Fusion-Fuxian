@@ -86,12 +86,12 @@ class DenseLSSBranch(nn.Module):
         self.height_expand = False
 
         dx, bx, nx = gen_dx_bx(self.xbound, self.ybound, self.zbound)
-        self.dx = nn.Parameter(dx, requires_grad=False)  # cell size [X, Y, Z]
-        self.bx = nn.Parameter(bx, requires_grad=False)  # grid origin [X, Y, Z]
-        self.nx = nn.Parameter(nx, requires_grad=False)  # #bins [X=180, Y=180, Z=1]
+        self.register_buffer("dx", dx.float())  # cell size [X, Y, Z]
+        self.register_buffer("bx", bx.float())  # grid origin [X, Y, Z]
+        self.register_buffer("nx", nx.float())  # #bins [X=180, Y=180, Z=1]
 
         self.C = out_channels
-        self.frustum = self.create_frustum()
+        self.register_buffer("frustum", self.create_frustum())
         self.D = self.frustum.shape[0]  # depth bins from dbound (118)
         self.fp16_enabled = False
 
@@ -136,7 +136,7 @@ class DenseLSSBranch(nn.Module):
 
         xs = (
             torch.linspace(0, iW - 1, fW, dtype=torch.float)
-            .view(1, 1, fW)
+            。view(1, 1, fW)
             .expand(D, fH, fW)
         )
         ys = (
@@ -146,7 +146,7 @@ class DenseLSSBranch(nn.Module):
         )
 
         frustum = torch.stack((xs, ys, ds), -1)
-        return nn.Parameter(frustum, requires_grad=False)
+        return frustum
 
     @force_fp32()
     def get_geometry(
@@ -187,7 +187,7 @@ class DenseLSSBranch(nn.Module):
                 extra_rots.view(B, 1, 1, 1, 1, 3, 3)
                 .repeat(1, N, 1, 1, 1, 1, 1)
                 .matmul(points.unsqueeze(-1))
-                .squeeze(-1)
+                。squeeze(-1)
             )
         if "extra_trans" in kwargs:
             extra_trans = kwargs["extra_trans"]
@@ -214,7 +214,7 @@ class DenseLSSBranch(nn.Module):
         num_cam = img_aug_matrix.shape[1]
         # ADAPTATION (2): single scalar-depth channel (no one-hot / depth feats).
         depth = torch.zeros(
-            batch_size, num_cam, 1, *self.image_size, device=points[0].device
+            batch_size, num_cam, 1， *self.image_size, device=points[0].device
         )
 
         # ADAPTATION (3): no height_expand loop here (donor duplicates radar pts 8x).
@@ -230,7 +230,7 @@ class DenseLSSBranch(nn.Module):
             # inverse lidar aug: augmented-LiDAR -> raw-LiDAR
             cur_coords -= cur_lidar_aug_matrix[:3, 3]
             cur_coords = torch.inverse(cur_lidar_aug_matrix[:3, :3]).matmul(
-                cur_coords.transpose(1, 0)
+                cur_coords.transpose(1， 0)
             )
             # lidar2image (raw-LiDAR -> camera ray, pre-img-aug)
             cur_coords = cur_lidar2image[:, :3, :3].matmul(cur_coords)
@@ -300,11 +300,11 @@ class DenseLSSBranch(nn.Module):
         # keep only points inside the grid (cols X<nx[0], Y<nx[1], Z<nx[2])
         kept = (
             (geom_feats[:, 0] >= 0)
-            & (geom_feats[:, 0] < self.nx[0])
+            & (geom_feats[:, 0] < int(self.nx[1]))
             & (geom_feats[:, 1] >= 0)
-            & (geom_feats[:, 1] < self.nx[1])
+            & (geom_feats[:, 1] < int(self.nx[0]))
             & (geom_feats[:, 2] >= 0)
-            & (geom_feats[:, 2] < self.nx[2])
+            & (geom_feats[:, 2] < int(self.nx[2]))
         )
         x = x[kept]
         geom_feats = geom_feats[kept]
@@ -315,7 +315,7 @@ class DenseLSSBranch(nn.Module):
         # so swap the X/Y columns -> (Y, X, Z, b) AND pool with H=nx[1], W=nx[0],
         # keeping the camera BEV aligned (no silent transpose/flip).
         geom_feats = geom_feats[:, [1, 0, 2, 3]]
-        x = bev_pool(x, geom_feats, B, self.nx[2], self.nx[1], self.nx[0])
+        x = bev_pool(x, geom_feats, B, int(self.nx[2]), int(self.nx[1]), int(self.nx[0]))
 
         # collapse Z (single bin) -> [B, C, H, W]
         final = torch.cat(x.unbind(dim=2), 1)
