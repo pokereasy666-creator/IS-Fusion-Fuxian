@@ -136,7 +136,7 @@ class DenseLSSBranch(nn.Module):
 
         xs = (
             torch.linspace(0, iW - 1, fW, dtype=torch.float)
-            。view(1, 1, fW)
+            .view(1, 1, fW)
             .expand(D, fH, fW)
         )
         ys = (
@@ -187,7 +187,7 @@ class DenseLSSBranch(nn.Module):
                 extra_rots.view(B, 1, 1, 1, 1, 3, 3)
                 .repeat(1, N, 1, 1, 1, 1, 1)
                 .matmul(points.unsqueeze(-1))
-                。squeeze(-1)
+                .squeeze(-1)
             )
         if "extra_trans" in kwargs:
             extra_trans = kwargs["extra_trans"]
@@ -214,7 +214,7 @@ class DenseLSSBranch(nn.Module):
         num_cam = img_aug_matrix.shape[1]
         # ADAPTATION (2): single scalar-depth channel (no one-hot / depth feats).
         depth = torch.zeros(
-            batch_size, num_cam, 1， *self.image_size, device=points[0].device
+            batch_size, num_cam, 1, *self.image_size, device=points[0].device
         )
 
         # ADAPTATION (3): no height_expand loop here (donor duplicates radar pts 8x).
@@ -230,7 +230,7 @@ class DenseLSSBranch(nn.Module):
             # inverse lidar aug: augmented-LiDAR -> raw-LiDAR
             cur_coords -= cur_lidar_aug_matrix[:3, 3]
             cur_coords = torch.inverse(cur_lidar_aug_matrix[:3, :3]).matmul(
-                cur_coords.transpose(1， 0)
+                cur_coords.transpose(1, 0)
             )
             # lidar2image (raw-LiDAR -> camera ray, pre-img-aug)
             cur_coords = cur_lidar2image[:, :3, :3].matmul(cur_coords)
