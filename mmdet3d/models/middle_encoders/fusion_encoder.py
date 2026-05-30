@@ -838,7 +838,7 @@ class ISFusionEncoder(BaseModule):
     Implements the decoder in DETR transformer.
     Args:
         return_intermediate (bool): Whether to return intermediate outputs.
-        coder_norm_cfg (dict): Config of last normalization layer. Default：
+        coder_norm_cfg (dict): Config of last normalization layer. Default:
             `LN`.
     """
 
@@ -868,18 +868,41 @@ class ISFusionEncoder(BaseModule):
             norm_cfg=dict(type='BN2d'),
             )
 
-        # Optional dense LSS image->BEV branch (default OFF -> baseline untouched).
-        # When enabled it replaces the sparse img_fv_to_bev path in forward(),
-        # producing the same [bs, 256, 180, 180] B_I. Imported lazily so the
-        # baseline never needs the compiled bev_pool_ext.
+        # Image->BEV mode for the dense LSS branch:
+        #   'off'     -> sparse img_fv_to_bev only (baseline; bit-identical)
+        #   'replace' -> dense LSS replaces the sparse B_I
+        #   'combine' -> sparse B_I AND dense B_I both computed, merged 512->256
+        # Back-compat: use_dense_image_bev=True maps to 'replace'.
+        # DenseLSSBranch is imported lazily so the baseline never needs bev_pool_ext.
         self.use_dense_image_bev = kwargs.get('use_dense_image_bev', False)
-        if self.use_dense_image_bev:
+        self.dense_image_bev_mode = kwargs.get(
+            'dense_image_bev_mode',
+            'replace' if self.use_dense_image_bev else 'off',
+        )
+        assert self.dense_image_bev_mode in ('off', 'replace', 'combine'), \
+            f"bad dense_image_bev_mode: {self.dense_image_bev_mode}"
+        if self.dense_image_bev_mode in ('replace', 'combine'):
             from .dense_lss import DenseLSSBranch
             self.dense_lss = DenseLSSBranch(
                 in_channels=embed_dims, out_channels=embed_dims,
                 image_size=(384, 1056), feature_size=(24, 66),
                 xbound=[-54.0, 54.0, 0.6], ybound=[-54.0, 54.0, 0.6],
                 zbound=[-5.0, 3.0, 8.0], dbound=[1.0, 60.0, 0.5],
+            )
+        if self.dense_image_bev_mode == 'combine':
+            # Norm-only 1x1 down-projection of cat([sparse_B_I, dense_B_I]) (512)
+            # -> 256. NO activation on purpose: conv_fusion already applies its own
+            # ReLU and the baseline sparse B_I enters conv_fusion pre-activation, so
+            # a ReLU here would stack a second nonlinearity / clip negatives the
+            # fusion conv was tuned around. Fresh-init -> (e) starts below baseline
+            # and climbs; read by final mAP. cat order is [sparse, dense].
+            self.dense_merge = ConvModule(
+                embed_dims * 2,
+                embed_dims,
+                kernel_size=1,
+                conv_cfg=dict(type='Conv2d'),
+                norm_cfg=dict(type='BN2d'),
+                act_cfg=None,
             )
 
         self.get_regions = nn.ModuleList()
@@ -1173,11 +1196,14 @@ class ISFusionEncoder(BaseModule):
                 **kwargs):
 
 
-        if self.use_dense_image_bev:
+        if self.dense_image_bev_mode in ('replace', 'combine'):
             B = bs
             N = img_mlvl_feats[1].shape[0] // B
             feat = img_mlvl_feats[1].view(B, N, self.embed_dims, 24, 66)
-            img_bev_feats = self.dense_lss(
+            # Compute dense FIRST: dense_lss clones points internally, so computing
+            # it before the sparse call avoids any dependence on whether
+            # img_fv_to_bev mutates shared kwargs in place.
+            dense_bev_feats = self.dense_lss(
                 feat,
                 kwargs['points'],
                 lidar2img=kwargs['lidar2img'],
@@ -1186,6 +1212,13 @@ class ISFusionEncoder(BaseModule):
                 camera2lidar=kwargs['camera2lidar'],
                 camera_intrinsics=kwargs['camera_intrinsics'],
             )
+            if self.dense_image_bev_mode == 'replace':
+                img_bev_feats = dense_bev_feats
+            else:  # 'combine'
+                sparse_bev_feats = self.img_fv_to_bev([img_mlvl_feats[1]], bs, **kwargs)
+                img_bev_feats = self.dense_merge(
+                    torch.cat([sparse_bev_feats, dense_bev_feats], dim=1)
+                )
         else:
             img_bev_feats = self.img_fv_to_bev([img_mlvl_feats[1]], bs, **kwargs)
 
