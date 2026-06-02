@@ -879,9 +879,9 @@ class ISFusionEncoder(BaseModule):
             'dense_image_bev_mode',
             'replace' if self.use_dense_image_bev else 'off',
         )
-        assert self.dense_image_bev_mode in ('off', 'replace', 'combine'), \
+        assert self.dense_image_bev_mode in ('off', 'replace', 'combine', 'gated'), \
             f"bad dense_image_bev_mode: {self.dense_image_bev_mode}"
-        if self.dense_image_bev_mode in ('replace', 'combine'):
+        if self.dense_image_bev_mode in ('replace', 'combine', 'gated'):
             from .dense_lss import DenseLSSBranch
             self.dense_lss = DenseLSSBranch(
                 in_channels=embed_dims, out_channels=embed_dims,
@@ -904,6 +904,12 @@ class ISFusionEncoder(BaseModule):
                 norm_cfg=dict(type='BN2d'),
                 act_cfg=None,
             )
+        if self.dense_image_bev_mode == 'gated':
+            # Normalize the dense fill into a comparable feature regime before it is
+            # placed into the empty cells (the splat-sum scale differs from the
+            # grid-sampled sparse features). Applied ONLY to the dense fill; the
+            # sparse populated cells pass through untouched.
+            self.dense_fill_norm = nn.BatchNorm2d(embed_dims)
 
         self.get_regions = nn.ModuleList()
         self.grid2region_att = nn.ModuleList()
@@ -1196,7 +1202,7 @@ class ISFusionEncoder(BaseModule):
                 **kwargs):
 
 
-        if self.dense_image_bev_mode in ('replace', 'combine'):
+        if self.dense_image_bev_mode in ('replace', 'combine', 'gated'):
             B = bs
             N = img_mlvl_feats[1].shape[0] // B
             feat = img_mlvl_feats[1].view(B, N, self.embed_dims, 24, 66)
@@ -1214,11 +1220,21 @@ class ISFusionEncoder(BaseModule):
             )
             if self.dense_image_bev_mode == 'replace':
                 img_bev_feats = dense_bev_feats
-            else:  # 'combine'
+            elif self.dense_image_bev_mode == 'combine':
                 sparse_bev_feats = self.img_fv_to_bev([img_mlvl_feats[1]], bs, **kwargs)
                 img_bev_feats = self.dense_merge(
                     torch.cat([sparse_bev_feats, dense_bev_feats], dim=1)
                 )
+            else:  # 'gated'
+                # Occupancy mask from the RAW sparse B_I: empty cells are exactly 0.0
+                # (img_fv_to_bev allocates a zero grid and scatters only where LiDAR
+                # points project). mask=1 -> keep sparse; mask=0 -> fill with dense.
+                sparse_bev_feats = self.img_fv_to_bev([img_mlvl_feats[1]], bs, **kwargs)
+                mask = (sparse_bev_feats.abs().sum(dim=1, keepdim=True) > 0).to(
+                    sparse_bev_feats.dtype
+                )
+                img_bev_feats = mask * sparse_bev_feats \
+                    + (1.0 - mask) * self.dense_fill_norm(dense_bev_feats)
         else:
             img_bev_feats = self.img_fv_to_bev([img_mlvl_feats[1]], bs, **kwargs)
 
