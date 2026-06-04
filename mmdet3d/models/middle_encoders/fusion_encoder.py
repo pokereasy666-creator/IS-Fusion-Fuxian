@@ -879,9 +879,9 @@ class ISFusionEncoder(BaseModule):
             'dense_image_bev_mode',
             'replace' if self.use_dense_image_bev else 'off',
         )
-        assert self.dense_image_bev_mode in ('off', 'replace', 'combine'), \
+        assert self.dense_image_bev_mode in ('off', 'replace', 'combine', 'density_gated'), \
             f"bad dense_image_bev_mode: {self.dense_image_bev_mode}"
-        if self.dense_image_bev_mode in ('replace', 'combine'):
+        if self.dense_image_bev_mode in ('replace', 'combine', 'density_gated'):
             from .dense_lss import DenseLSSBranch
             self.dense_lss = DenseLSSBranch(
                 in_channels=embed_dims, out_channels=embed_dims,
@@ -904,6 +904,9 @@ class ISFusionEncoder(BaseModule):
                 norm_cfg=dict(type='BN2d'),
                 act_cfg=None,
             )
+        if self.dense_image_bev_mode == 'density_gated':
+            self.dense_fill_norm = nn.BatchNorm2d(embed_dims)
+            self.density_tau = kwargs.get('density_tau', 10.0)
 
         self.get_regions = nn.ModuleList()
         self.grid2region_att = nn.ModuleList()
@@ -1196,7 +1199,7 @@ class ISFusionEncoder(BaseModule):
                 **kwargs):
 
 
-        if self.dense_image_bev_mode in ('replace', 'combine'):
+        if self.dense_image_bev_mode in ('replace', 'combine', 'density_gated'):
             B = bs
             N = img_mlvl_feats[1].shape[0] // B
             feat = img_mlvl_feats[1].view(B, N, self.embed_dims, 24, 66)
@@ -1214,6 +1217,20 @@ class ISFusionEncoder(BaseModule):
             )
             if self.dense_image_bev_mode == 'replace':
                 img_bev_feats = dense_bev_feats
+            elif self.dense_image_bev_mode == 'density_gated':
+                sparse_bev_feats = self.img_fv_to_bev([img_mlvl_feats[1]], bs, **kwargs)
+                # per-cell LiDAR point count, same grid + indexing as img_fv_to_bev
+                pm = kwargs['pts_metas']
+                pcoors = pm['pillar_coors']
+                pnum = pm['pillars_num_points'].to(sparse_bev_feats.dtype)
+                density = sparse_bev_feats.new_zeros(bs, 1, self.bev_size, self.bev_size)
+                for b in range(bs):
+                    m = pcoors[:, 0] == b
+                    hh = pcoors[m, 2].long(); ww = pcoors[m, 3].long()
+                    density[b, 0].index_put_((hh, ww), pnum[m], accumulate=True)
+                keep = (density >= self.density_tau).to(sparse_bev_feats.dtype)
+                img_bev_feats = keep * sparse_bev_feats \
+                    + (1.0 - keep) * self.dense_fill_norm(dense_bev_feats)
             else:  # 'combine'
                 sparse_bev_feats = self.img_fv_to_bev([img_mlvl_feats[1]], bs, **kwargs)
                 img_bev_feats = self.dense_merge(
